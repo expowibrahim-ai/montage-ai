@@ -1,0 +1,292 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: montage-ai
+
+resources:
+  - cluster-rbac.yaml
+  - deployment.yaml
+  - worker.yaml
+  - cgpu-server.yaml
+  - redis.yaml
+  - service-ingress.yaml
+  - pvc.yaml
+  - resourcequota.yaml
+  - network-policy.yaml
+  - monitoring.yaml
+  - pdb.yaml
+
+# =============================================================================
+# Image Configuration (config-global.yaml -> cluster-config.env)
+# =============================================================================
+# Render deploy/k3s/base/cluster-config.env via:
+#   make -C deploy/k3s config
+# Images are updated via replacements using IMAGE_FULL.
+
+# Disable hash suffix on generated ConfigMaps so that envFrom.configMapRef
+# and replacements resolve to the literal name (fixes #38).
+generatorOptions:
+  disableNameSuffixHash: true
+
+# ConfigMap for deployment settings (overlays can patch)
+configMapGenerator:
+  - name: cluster-config
+    behavior: create
+    envs:
+      - cluster-config.env
+
+  - name: montage-ai-config
+    behavior: create
+    literals:
+      - CUT_STYLE=dynamic
+      - STABILIZE=false
+      - UPSCALE=false
+      - ENHANCE=false
+      - CLUSTER_MODE=true
+      - CLUSTER_TOLERATE_GPU=true
+      - FFMPEG_HWACCEL=none
+      - MONTAGE_CLUSTER_MODE=k8s
+      - CLUSTER_USE_JOBSET=true
+      - SCENE_CACHE_DIR=/data/output/scene_cache
+      - PROXY_CACHE_DIR=/data/output/proxy_cache
+      - segment_writer.py=patches/segment_writer.py
+  - name: montage-ai-patch-clip-processor
+    files:
+      - clip_processor.py=patches/clip_processor.py
+  - name: montage-ai-patch-analysis-engine
+    files:
+      - analysis_engine.py=patches/analysis_engine.py
+  - name: montage-ai-patch-hardware
+    files:
+      - hardware.py=patches/hardware.py
+  - name: montage-ai-patch-creative-director
+    files:
+      - creative_director.py=patches/creative_director.py
+  - name: montage-ai-patch-proxy-generator
+    files:
+      - proxy_generator.py=patches/proxy_generator.py
+
+replacements:
+  - source:
+      kind: ConfigMap
+      name: cluster-config
+      fieldPath: data.IMAGE_FULL
+    targets:
+      - select:
+          kind: Deployment
+          name: montage-ai-web
+        fieldPaths:
+          - spec.template.spec.containers.[name=montage-ai].image
+      - select:
+          kind: Deployment
+          name: montage-ai-worker
+        fieldPaths:
+          - spec.template.spec.containers.[name=worker].image
+          - spec.template.spec.initContainers.[name=cgpu-credentials-init].image
+      - select:
+          kind: Deployment
+          name: cgpu-server
+        fieldPaths:
+          - spec.template.spec.initContainers.[name=cgpu-credentials-init].image
+          - spec.template.spec.containers.[name=cgpu-server].image
+      - select:
+          kind: Job
+          name: montage-ai-render
+        fieldPaths:
+          - spec.template.spec.initContainers.[name=cgpu-credentials-init].image
+          - spec.template.spec.containers.[name=montage-ai].image
+
+  - source:
+      kind: ConfigMap
+      name: cluster-config
+      fieldPath: data.MONTAGE_HOSTNAME
+    targets:
+      - select:
+          kind: Ingress
+          name: montage-ai-web
+        fieldPaths:
+          - spec.rules.0.host
+  - source:
+      kind: ConfigMap
+      name: cluster-config
+      fieldPath: data.STORAGE_CLASS_DEFAULT
+    targets:
+      - select:
+          kind: PersistentVolumeClaim
+          name: montage-input
+        fieldPaths:
+          - spec.storageClassName
+      - select:
+          kind: PersistentVolumeClaim
+          name: montage-output
+        fieldPaths:
+          - spec.storageClassName
+      - select:
+          kind: PersistentVolumeClaim
+          name: montage-music
+        fieldPaths:
+          - spec.storageClassName
+      - select:
+          kind: PersistentVolumeClaim
+          name: montage-assets
+        fieldPaths:
+          - spec.storageClassName
+      - select:
+          kind: PersistentVolumeClaim
+          name: montage-cache
+        fieldPaths:
+          - spec.storageClassName
+  - source:
+      kind: ConfigMap
+      name: cluster-config
+      fieldPath: data.PVC_INPUT_NAME
+    targets:
+      - select:
+          kind: PersistentVolumeClaim
+          name: montage-input
+        fieldPaths:
+          - metadata.name
+      - select:
+          kind: Deployment
+          name: montage-ai-web
+        fieldPaths:
+          - spec.template.spec.volumes.[name=data-input].persistentVolumeClaim.claimName
+          - spec.template.spec.volumes.[name=input].persistentVolumeClaim.claimName
+      - select:
+          kind: Deployment
+          name: montage-ai-worker
+        fieldPaths:
+          - spec.template.spec.volumes.[name=data-input].persistentVolumeClaim.claimName
+      - select:
+          kind: CronJob
+          name: montage-ai-scheduled
+        fieldPaths:
+          - spec.jobTemplate.spec.template.spec.volumes.[name=input].persistentVolumeClaim.claimName
+  - source:
+      kind: ConfigMap
+      name: cluster-config
+      fieldPath: data.PVC_OUTPUT_NAME
+    targets:
+      - select:
+          kind: PersistentVolumeClaim
+          name: montage-output
+        fieldPaths:
+          - metadata.name
+      - select:
+          kind: Deployment
+          name: montage-ai-web
+        fieldPaths:
+          - spec.template.spec.volumes.[name=data-output].persistentVolumeClaim.claimName
+          - spec.template.spec.volumes.[name=output].persistentVolumeClaim.claimName
+      - select:
+          kind: Deployment
+          name: montage-ai-worker
+        fieldPaths:
+          - spec.template.spec.volumes.[name=data-output].persistentVolumeClaim.claimName
+      - select:
+          kind: CronJob
+          name: montage-ai-scheduled
+        fieldPaths:
+          - spec.jobTemplate.spec.template.spec.volumes.[name=output].persistentVolumeClaim.claimName
+  - source:
+      kind: ConfigMap
+      name: cluster-config
+      fieldPath: data.PVC_MUSIC_NAME
+    targets:
+      - select:
+          kind: PersistentVolumeClaim
+          name: montage-music
+        fieldPaths:
+          - metadata.name
+      - select:
+          kind: Deployment
+          name: montage-ai-web
+        fieldPaths:
+          - spec.template.spec.volumes.[name=data-music].persistentVolumeClaim.claimName
+          - spec.template.spec.volumes.[name=music].persistentVolumeClaim.claimName
+      - select:
+          kind: Deployment
+          name: montage-ai-worker
+        fieldPaths:
+          - spec.template.spec.volumes.[name=data-music].persistentVolumeClaim.claimName
+      - select:
+          kind: CronJob
+          name: montage-ai-scheduled
+        fieldPaths:
+          - spec.jobTemplate.spec.template.spec.volumes.[name=music].persistentVolumeClaim.claimName
+  - source:
+      kind: ConfigMap
+      name: cluster-config
+      fieldPath: data.PVC_ASSETS_NAME
+    targets:
+      - select:
+          kind: PersistentVolumeClaim
+          name: montage-assets
+        fieldPaths:
+          - metadata.name
+      - select:
+          kind: Deployment
+          name: montage-ai-web
+        fieldPaths:
+          - spec.template.spec.volumes.[name=data-assets].persistentVolumeClaim.claimName
+          - spec.template.spec.volumes.[name=assets].persistentVolumeClaim.claimName
+      - select:
+          kind: Deployment
+          name: montage-ai-worker
+        fieldPaths:
+          - spec.template.spec.volumes.[name=data-assets].persistentVolumeClaim.claimName
+      - select:
+          kind: CronJob
+          name: montage-ai-scheduled
+        fieldPaths:
+          - spec.jobTemplate.spec.template.spec.volumes.[name=assets].persistentVolumeClaim.claimName
+  - source:
+      kind: ConfigMap
+      name: cluster-config
+      fieldPath: data.WORKER_CPU_REQUEST
+    targets:
+      - select:
+          kind: Deployment
+          name: montage-ai-worker
+        fieldPaths:
+          - spec.template.spec.containers.[name=worker].resources.requests.cpu
+  - source:
+      kind: ConfigMap
+      name: cluster-config
+      fieldPath: data.WORKER_CPU_LIMIT
+    targets:
+      - select:
+          kind: Deployment
+          name: montage-ai-worker
+        fieldPaths:
+          - spec.template.spec.containers.[name=worker].resources.limits.cpu
+  - source:
+      kind: ConfigMap
+      name: cluster-config
+      fieldPath: data.WORKER_MEMORY_REQUEST
+    targets:
+      - select:
+          kind: Deployment
+          name: montage-ai-worker
+        fieldPaths:
+          - spec.template.spec.containers.[name=worker].resources.requests.memory
+  - source:
+      kind: ConfigMap
+      name: cluster-config
+      fieldPath: data.WORKER_MEMORY_LIMIT
+    targets:
+      - select:
+          kind: Deployment
+          name: montage-ai-worker
+        fieldPaths:
+          - spec.template.spec.containers.[name=worker].resources.limits.memory
+  - source:
+      kind: ConfigMap
+      name: cluster-config
+      fieldPath: data.CGPU_REPLICAS
+    targets:
+      - select:
+          kind: Deployment
+          name: cgpu-server
+        fieldPaths:
+          - spec.replicas

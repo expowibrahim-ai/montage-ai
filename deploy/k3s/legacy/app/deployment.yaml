@@ -1,0 +1,177 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: montage-ai-web
+  namespace: montage-ai
+  labels:
+    app: montage-ai
+    component: web
+    app.kubernetes.io/part-of: fluxibri-v2
+  annotations:
+    deployment.kubernetes.io/revision: "2"
+    stabilization.montage-ai/level: "hardened-v2"
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: montage-ai
+      component: web
+  template:
+    metadata:
+      labels:
+        app: montage-ai
+        component: web
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      # Graceful shutdown: Allow 60 seconds for FFmpeg cleanup + connection draining
+      terminationGracePeriodSeconds: 60
+      dnsPolicy: ClusterFirst
+      restartPolicy: Always
+      serviceAccountName: montage-ai-cluster
+      priorityClassName: montage-ai-interactive
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            app: montage-ai
+            component: web
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchLabels:
+                  app: montage-ai
+                  component: web
+              topologyKey: kubernetes.io/hostname
+      # Schedule only on amd64 nodes (image is amd64, ARM64 nodes will fail)
+      nodeSelector:
+        kubernetes.io/arch: amd64
+      tolerations:
+      - key: "nvidia.com/gpu"
+        operator: "Exists"
+        effect: "NoSchedule"
+      - key: "amd.com/gpu"
+        operator: "Exists"
+        effect: "NoSchedule"
+      - key: "gpu"
+        operator: "Equal"
+        value: "amd-rocm"
+        effect: "NoSchedule"
+      containers:
+      - name: montage-ai
+        image: <IMAGE_FULL>
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8080
+          name: http
+          protocol: TCP
+        env:
+        - name: FLASK_ENV
+          value: "production"
+        - name: LOG_LEVEL
+          value: "INFO"
+        - name: QUALITY_PROFILE
+          value: "standard"
+        - name: CGPU_ENABLED
+          value: "false"
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        - name: GRACEFUL_SHUTDOWN_TIMEOUT
+          value: "55"
+        - name: REDIS_RETRY_BACKOFF
+          value: "1"
+        - name: REDIS_MAX_RETRIES
+          value: "3"
+        volumeMounts:
+        - name: data-input
+          mountPath: /data/input
+        - name: data-output
+          mountPath: /data/output
+        - name: data-music
+          mountPath: /data/music
+        - name: data-assets
+          mountPath: /data/assets
+        - name: cache
+          mountPath: /data/cache
+        - name: tmp-segments
+          mountPath: /tmp/segments
+        resources:
+          requests:
+            memory: "2.5Gi"          # Increased baseline for stability
+            cpu: "1500m"
+            ephemeral-storage: "10Gi"
+          limits:
+            memory: "5.5Gi"          # Reduced from 6Gi for stability
+            cpu: "3500m"
+            ephemeral-storage: "15Gi"
+        # Graceful shutdown hook
+        lifecycle:
+          preStop:
+            exec:
+              command:
+                - sh
+                - -c
+                - |
+                  curl -s -X POST "http://127.0.0.1:${PORT:-8080}/api/shutdown" || true
+                  sleep 50
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 45      # Increased from 30
+          periodSeconds: 15            # Decreased from 10 (less aggressive)
+          timeoutSeconds: 5
+          failureThreshold: 2           # Stricter: 30s total (15 × 2)
+          successThreshold: 1
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: http
+            httpHeaders:
+              - name: X-Readiness-Check
+                value: "true"
+          initialDelaySeconds: 15      # Increased from 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 2
+          successThreshold: 1
+        startupProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 0
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 30  # Allow 150 seconds for startup
+      volumes:
+      - name: data-input
+        persistentVolumeClaim:
+          claimName: montage-input
+      - name: data-output
+        persistentVolumeClaim:
+          claimName: montage-output
+      - name: data-music
+        persistentVolumeClaim:
+          claimName: montage-music
+      - name: data-assets
+        persistentVolumeClaim:
+          claimName: montage-assets
+      - name: cache
+        persistentVolumeClaim:
+          claimName: montage-cache
+      - name: tmp-segments
+        emptyDir:
+          sizeLimit: 100Gi

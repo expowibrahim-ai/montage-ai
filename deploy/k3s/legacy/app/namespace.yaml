@@ -1,0 +1,13 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: montage-ai
+  labels:
+    app.kubernetes.io/part-of: fluxibri-v2
+    fluxibri.ai/component: applications
+    fluxibri.ai/adaptive-quota: "true"
+    # Use baseline pod security for video processing workloads
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/audit: baseline
+    pod-security.kubernetes.io/warn: baseline

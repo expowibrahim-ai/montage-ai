@@ -1,0 +1,86 @@
+# Docker Compose for Montage AI Web UI
+#
+# DEPRECATED: Use docker-compose.yml (single local Docker entrypoint).
+#
+# Usage:
+#   docker compose -f docker-compose.web.yml up
+#
+# Environment variables (optional):
+#   CGPU_GPU_ENABLED=true  - Enable cloud GPU for upscaling
+#   CGPU_ENABLED=true      - Enable cgpu LLM serve
+#   GOOGLE_API_KEY=xxx     - Google AI API key
+
+services:
+  web-ui:
+    build:
+      context: .
+      network: host
+      args:
+        GIT_COMMIT: ${GIT_COMMIT:-dev}
+    entrypoint: ["python", "-u", "-m", "montage_ai.web_ui.app"]
+    ports:
+      - "${WEB_PORT:-8080}:8080"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./data:/data
+      # Source code mount for development (live reload)
+      - ./src/montage_ai:/app/src/montage_ai:ro
+      # cgpu Cloud GPU credentials (optional)
+      - ${HOME}/.config/cgpu:/root/.config/cgpu:ro
+    environment:
+      - FLASK_ENV=${FLASK_ENV:-production}
+      - INPUT_DIR=${INPUT_DIR:-/data/input}
+      - MUSIC_DIR=${MUSIC_DIR:-/data/music}
+      - OUTPUT_DIR=${OUTPUT_DIR:-/data/output}
+      # AI / LLM Configuration - Priority: OpenAI-compatible (LiteLLM canonical) > Google AI > cgpu > Ollama
+      # LiteLLM Unified Proxy (in-cluster, canonical fluxibri_core pattern)
+      - LITELLM_API_KEY=${LITELLM_API_KEY:-}
+      # OpenAI-compatible API (KubeAI, vLLM, LocalAI) - RECOMMENDED
+      - OPENAI_API_BASE=${OPENAI_API_BASE:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-${LITELLM_API_KEY}}
+      - OPENAI_MODEL=${OPENAI_MODEL:-}  # Creative Director (e.g. gemma3-4b)
+      - OPENAI_VISION_MODEL=${OPENAI_VISION_MODEL:-}  # Scene analysis (e.g. moondream2)
+      # Ollama (local fallback)
+      - OLLAMA_HOST=${OLLAMA_HOST:-http://host.docker.internal:11434}
+      # Google AI (alternative LLM backend)
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
+      - GOOGLE_AI_MODEL=${GOOGLE_AI_MODEL:-gemini-2.0-flash}
+      # LLM-powered clip selection - enabled by default
+      - LLM_CLIP_SELECTION=${LLM_CLIP_SELECTION:-true}
+      # cgpu Cloud GPU for upscaling
+      - CGPU_GPU_ENABLED=${CGPU_GPU_ENABLED:-true}
+      - CGPU_TIMEOUT=${CGPU_TIMEOUT:-1200}
+      # cgpu LLM serve (alternative to Google AI)
+      - CGPU_ENABLED=${CGPU_ENABLED:-true}
+      - CGPU_HOST=${CGPU_HOST:-host.docker.internal}
+      # Aspect Ratio Handling
+      # false (default): Crop to fill frame (may cut edges)
+      # true: Letterbox/pillarbox to preserve full content
+      - PRESERVE_ASPECT=${PRESERVE_ASPECT:-false}
+      # FFmpeg Hardware Acceleration (GPU encoding/decoding)
+      # Options: auto (detect), nvenc (NVIDIA), vaapi (AMD/Intel), qsv (Intel), none (CPU)
+      - FFMPEG_HWACCEL=${FFMPEG_HWACCEL:-auto}
+      - VERBOSE=${VERBOSE:-true}
+      - MAX_CONCURRENT_JOBS=${MAX_CONCURRENT_JOBS:-2}
+    restart: unless-stopped
+    # === GPU ACCESS (for hardware video encoding) ===
+    # For AMD/Intel VAAPI, add:
+    devices:
+      - /dev/dri:/dev/dri  # VAAPI/VA-API access for AMD/Intel GPU
+    # Note: For NVIDIA GPU, uncomment the nvidia runtime in deploy.resources.reservations
+    # Resource limits (override via env values)
+    deploy:
+      resources:
+        limits:
+          memory: ${WEB_MEMORY_LIMIT:-20G}
+          cpus: '${WEB_CPU_LIMIT:-4.0}'
+        reservations:
+          memory: ${WEB_MEMORY_RESERVATION:-4G}
+          cpus: '${WEB_CPU_RESERVATION:-1.0}'
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s

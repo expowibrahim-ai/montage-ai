@@ -1,0 +1,49 @@
+---
+# Montage-AI Web UI Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: montage-ai-web
+  namespace: montage-ai
+  labels:
+    app.kubernetes.io/name: montage-ai
+    app.kubernetes.io/component: web-ui
+    fluxibri.ai/tier: web
+spec:
+  type: ClusterIP
+  ports:
+  - name: http
+    port: 80
+    targetPort: 8080
+    protocol: TCP
+  selector:
+    app.kubernetes.io/name: montage-ai
+    app.kubernetes.io/component: web-ui
+---
+# Montage-AI Ingress (host set via MONTAGE_HOSTNAME in cluster-config)
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: montage-ai-web
+  namespace: montage-ai
+  labels:
+    app.kubernetes.io/name: montage-ai
+    app.kubernetes.io/component: web-ui
+    fluxibri.ai/tier: web
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: web
+    # Allow large file uploads (videos)
+    traefik.ingress.kubernetes.io/buffering-maxrequestbody: "5000000000"
+spec:
+  ingressClassName: traefik
+  rules:
+  - host: <MONTAGE_HOSTNAME>
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: montage-ai-web
+            port:
+              number: 80

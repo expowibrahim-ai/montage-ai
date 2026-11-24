@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% from "components/icon.html" import icon %}
+{% import "components/macros.html" as m %}
+
+{% block title %}Shorts Studio - Montage AI{% endblock %}
+
+{% block extra_css %}
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/icons.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/shorts.css') }}">
+    <script src="https://unpkg.com/lucide@latest" defer></script>
+{% endblock %}
+
+{% block content %}
+    <div class="mb-8">
+        <h1 class="voxel-title glitch-text">SHORTS STUDIO</h1>
+        <p class="text-muted">// Create 9:16 vertical shorts. AI crops, frames, & optimizes for mobile feeds.</p>
+        <div class="cyber-progress mt-1"></div>
+    </div>
+    <div class="voxel-card">
+        <h3 class="text-primary mb-2">COMING SOON</h3>
+        <p class="text-xs text-muted">
+            Shorts Studio UI is not wired to the backend yet. Use the CLI or API endpoints for
+            shorts rendering while we finish the integration.
+        </p>
+    </div>
+{% endblock %}

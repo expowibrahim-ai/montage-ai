@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% import "components/macros.html" as m %}
+
+{% block title %}Features - Montage AI{% endblock %}
+
+{% block content %}
+    {% call m.section_header("FEATURES", "Core capabilities and workflow tools.") %}{% endcall %}
+
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+        {% call m.voxel_card("BEAT-SYNC MONTAGES") %}
+            <p class="text-sm text-muted">Advanced audio analysis aligns cuts precisely with musical beats. Supports multiple editing styles (Dynamic, Hitchcock, MTV) to match the rhythm of your soundtrack.</p>
+        {% endcall %}
+
+        {% call m.voxel_card("VERTICAL SHORTS GENERATOR", theme="secondary") %}
+            <p class="text-sm text-muted">Intelligent auto-reframing for social media. Detected faces and subjects are kept in focus within the 9:16 aspect ratio automatically.</p>
+        {% endcall %}
+
+        {% call m.voxel_card("TEXT-BASED EDITING") %}
+            <p class="text-sm text-muted">Edit video by editing the transcript. Remove filler words, rearrange sentences, and create cuts just by manipulating text.</p>
+        {% endcall %}
+
+        {% call m.voxel_card("PROFESSIONAL EXPORT", theme="secondary") %}
+            <p class="text-sm text-muted">Export to standard video formats (MP4, MKV) or generate OTIO/EDL timelines for further refinement in DaVinci Resolve or Premiere Pro.</p>
+        {% endcall %}
+        
+        {% call m.voxel_card("HARDWARE ACCELERATION") %}
+            <p class="text-sm text-muted">Optimized for diverse hardware. Utilizes NVIDIA NVENC, Intel QSV, Jetson NVMPI, and Cloud GPU offloading for efficient rendering.</p>
+        {% endcall %}
+
+        {% call m.voxel_card("POLISHED COLOR GRADING", theme="secondary") %}
+            <p class="text-sm text-muted">Apply cinematic LUTs and color grading presets. From Blockbuster Action to Wes Anderson styles, enhance the visual tone of your footage automatically.</p>
+        {% endcall %}
+    </div>
+    
+    <div class="text-center">
+        <a href="/" class="voxel-btn voxel-btn-primary">Back to Dashboard</a>
+    </div>
+{% endblock %}

@@ -1,0 +1,42 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: montage-ai-worker
+spec:
+  template:
+    spec:
+      tolerations:
+        - key: "gpu"
+          operator: "Equal"
+          value: "amd-rocm"
+          effect: "NoSchedule"
+      containers:
+        - name: worker
+        image: <IMAGE_FULL>
+          imagePullPolicy: Always
+          resources:
+            requests:
+              cpu: "300m"
+              memory: "1Gi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"
+          env:
+            - name: PREVIEW_MAX_INPUT_SIZE_MB
+              value: "10000"
+            - name: PREVIEW_MAX_FILES
+              value: "10"
+          volumeMounts:
+            - name: data-input
+              mountPath: /data/input
+            - name: data-output
+              mountPath: /data/output
+            - name: data-music
+              mountPath: /data/music
+            - name: data-assets
+              mountPath: /data/assets
+            - name: data-input
+              mountPath: /data/cache
+              subPath: cache
+            - name: tmp-segments
+              mountPath: /tmp/segments

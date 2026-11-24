@@ -1,0 +1,140 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: montage-ai-refined-trailer
+  namespace: montage-ai
+  labels:
+    app.kubernetes.io/name: montage-ai
+    app.kubernetes.io/component: renderer
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: montage-ai
+        app.kubernetes.io/component: renderer
+    spec:
+      restartPolicy: Never
+      serviceAccountName: montage-ai-cluster
+      priorityClassName: montage-ai-batch
+      tolerations:
+        - key: "nvidia.com/gpu"
+          operator: "Exists"
+          effect: "NoSchedule"
+        - key: "amd.com/gpu"
+          operator: "Exists"
+          effect: "NoSchedule"
+        - key: "gpu"
+          operator: "Equal"
+          value: "amd-rocm"
+          effect: "NoSchedule"
+        - key: "gpu"
+          operator: "Equal"
+          value: "nvidia-tegra"
+          effect: "NoSchedule"
+      imagePullSecrets:
+        - name: ghcr-pull
+      containers:
+        - name: montage-ai
+          image: <IMAGE_FULL>
+          imagePullPolicy: Always
+          resources:
+            requests:
+              cpu: "8"
+              memory: "16Gi"
+            limits:
+              cpu: "16"
+              memory: "24Gi"
+          env:
+            - name: CUT_STYLE
+              value: "cinema_trailer"
+            - name: EXPORT_TIMELINE
+              value: "true"
+            - name: LOG_LEVEL
+              value: "DEBUG"
+            - name: CLUSTER_MODE
+              value: "true"
+            - name: CLUSTER_PARALLELISM
+              value: "4"
+            - name: CLUSTER_RENDER_TIER
+              value: "large"
+            - name: CGPU_ENABLED
+              value: "true"
+            - name: CGPU_GPU_ENABLED
+              value: "true"
+            - name: PVC_INPUT_NAME
+              value: "montage-ai-input-nfs"
+            - name: PVC_OUTPUT_NAME
+              value: "montage-ai-output-nfs"
+            - name: PVC_MUSIC_NAME
+              value: "montage-ai-music-nfs"
+            - name: PVC_ASSETS_NAME
+              value: "montage-ai-assets-nfs"
+            - name: UPSCALE
+              value: "true"
+            - name: STABILIZE
+              value: "true"
+            - name: COLOR_MATCH
+              value: "true"
+            - name: ENHANCE
+              value: "true"
+            - name: INPUT_DIR
+              value: "/data/input"
+            - name: MUSIC_DIR
+              value: "/data/music/techno-nature"
+            - name: TARGET_DURATION
+              value: "30"
+            - name: MUSIC_END
+              value: "30"
+            - name: LLM_CLIP_SELECTION
+              value: "true"
+            - name: NORMALIZE_CLIPS
+              value: "true"
+            - name: FFMPEG_THREADS
+              value: "2"
+            - name: FFMPEG_HWACCEL
+              value: "auto"
+            - name: EXTRACT_REENCODE
+              value: "true"
+            - name: MAX_PARALLEL_JOBS
+              value: "8"
+            - name: TEMP_DIR
+              value: "/data/output/tmp"
+            - name: CREATIVE_LOOP
+              value: "false"
+          envFrom:
+            - configMapRef:
+                name: montage-ai-config
+          command: ["/bin/sh", "-c", "echo 'Waiting for code sync...'; sleep 5; echo 'Starting Refined Trailer Run...'; python -u -m montage_ai.editor"]
+          volumeMounts:
+            - name: input
+              mountPath: /data/input
+              readOnly: true
+            - name: music
+              mountPath: /data/music
+              readOnly: true
+            - name: assets
+              mountPath: /data/assets
+              readOnly: true
+            - name: output
+              mountPath: /data/output
+            - name: temp
+              mountPath: /tmp/montage_tmp
+      volumes:
+        - name: input
+          persistentVolumeClaim:
+            claimName: montage-ai-input-nfs
+        - name: music
+          persistentVolumeClaim:
+            claimName: montage-ai-music-nfs
+        - name: assets
+          persistentVolumeClaim:
+            claimName: montage-ai-assets-nfs
+        - name: output
+          persistentVolumeClaim:
+            claimName: montage-ai-output-nfs
+        - name: temp
+          emptyDir: {}
+      nodeSelector:
+        kubernetes.io/arch: amd64

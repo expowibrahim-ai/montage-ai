@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% import "components/macros.html" as m %}
+
+{% block title %}Settings - Montage AI{% endblock %}
+
+{% block extra_css %}
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/settings.css') }}">
+{% endblock %}
+
+{% block content %}
+    {% call m.section_header("SETTINGS", "System configuration and AI parameters.") %}{% endcall %}
+
+    <div class="grid grid-cols-1 gap-4">
+        {% call m.voxel_card("HARDWARE ACCELERATION", "Configure GPU usage for rendering and AI inference.") %}
+            <div class="settings-item">
+                <div class="settings-item-info">
+                    <div class="text-sm font-bold">GPU Encoding</div>
+                    <div class="text-xs text-muted">Intel QSV / NVIDIA NVENC / Apple Silicon</div>
+                </div>
+                {{ m.badge("ENABLED", "success") }}
+            </div>
+        {% endcall %}
+
+        {% call m.voxel_card("AI MODELS", "Active LLM and Vision models for analysis and creative direction.") %}
+            <div class="settings-item">
+                <div class="settings-item-info">
+                    <div class="text-sm font-bold">Creative Director</div>
+                    <div class="text-xs text-muted">Gemini 1.5 Flash (Cloud)</div>
+                </div>
+                {{ m.badge("CONNECTED", "secondary") }}
+            </div>
+        {% endcall %}
+    </div>
+{% endblock %}

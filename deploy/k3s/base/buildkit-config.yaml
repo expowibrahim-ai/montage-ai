@@ -1,0 +1,25 @@
+# =============================================================================
+# BuildKit ConfigMap
+# =============================================================================
+# Configure for your container registry. For insecure (HTTP) registries,
+# update the registry address below.
+#
+# Usage:
+#   kubectl apply -f buildkit-config.yaml
+#
+# For self-hosted registries, update the registry address:
+#   [registry."your-registry:5000"]
+# =============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: buildkit-config
+  namespace: montage-ai
+data:
+  buildkitd.toml: |
+    debug = true
+    # Configure your container registry here
+    # Example for insecure local registry:
+    # [registry."your-registry:5000"]
+    #   http = true
+    #   insecure = true

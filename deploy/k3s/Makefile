@@ -1,0 +1,89 @@
+# ==============================================================================
+# Montage-AI K3s/K8s - Canonical Makefile (Fluxibri-aligned)
+# Single entry point for cluster operations
+# ==============================================================================
+
+.PHONY: help init-config config validate validate-config pre-flight diff deploy deploy-cluster status health test-e2e install-keda install-jobset check-jobset
+
+GREEN  := $(shell tput -Txterm setaf 2 2>/dev/null || echo '')
+YELLOW := $(shell tput -Txterm setaf 3 2>/dev/null || echo '')
+CYAN   := $(shell tput -Txterm setaf 6 2>/dev/null || echo '')
+RED    := $(shell tput -Txterm setaf 1 2>/dev/null || echo '')
+RESET  := $(shell tput -Txterm sgr0 2>/dev/null || echo '')
+
+KUBECTL ?= kubectl
+KUSTOMIZE_BUILD ?= kustomize build --load-restrictor LoadRestrictionsNone
+CONFIG_GLOBAL ?= ./config-global.yaml
+-include base/cluster-config.env
+CLUSTER_NAMESPACE ?= montage-ai
+
+CONFIG_ENV_SCRIPT := ../../scripts/ops/render_cluster_config_env.sh
+
+help: ## Show this help message
+	@echo '${CYAN}Montage-AI Cluster Management${RESET}'
+	@echo ''
+	@echo 'Usage: ${YELLOW}make <target>${RESET}'
+	@echo ''
+	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  ${YELLOW}%-25s${RESET} %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+	@echo ''
+
+init-config: ## Generate config-global.yaml from example with sensible defaults (env overridable)
+	@bash ./init-config.sh
+
+config: ## Render deploy/k3s/base/cluster-config.env from config-global.yaml
+	@if [ -x "$(CONFIG_ENV_SCRIPT)" ]; then \
+		CONFIG_GLOBAL="$(CONFIG_GLOBAL)" ENV_OUT=./base/cluster-config.env bash "$(CONFIG_ENV_SCRIPT)"; \
+	else \
+		echo "${YELLOW}Missing $(CONFIG_ENV_SCRIPT); using cluster-config.env.example${RESET}"; \
+		cp ./base/cluster-config.env.example ./base/cluster-config.env; \
+	fi
+	@bash ./validate-config.sh $(CONFIG_GLOBAL)
+
+validate: config ## Validate kustomize builds
+	@echo "${GREEN}Validating base manifests...${RESET}"
+	@$(KUSTOMIZE_BUILD) ./base >/dev/null
+	@echo "${GREEN}Validating cluster overlay...${RESET}"
+	@$(KUSTOMIZE_BUILD) ./overlays/cluster >/dev/null
+	@echo "${GREEN}✓ Validation complete${RESET}"
+
+# Cluster dependency helpers
+deps: ## Print/install cluster dependencies (KEDA, JobSet CRD)
+	@echo "${YELLOW}Run 'make install-keda' to install KEDA via Helm, or follow docs/${RESET}"
+
+install-keda: ## Install KEDA via Helm (pinned to v2.16 for K8s ≥1.28 compat)
+	@echo "${GREEN}Installing KEDA via Helm...${RESET}"
+	@helm repo add kedacore https://kedacore.github.io/charts || true
+	@helm repo update || true
+	@helm list -n keda | grep keda || helm install keda kedacore/keda --namespace keda --create-namespace --version 2.16.1 || true
+
+install-jobset: ## Install JobSet CRD (optional, enables parallel render jobs)
+	@echo "${GREEN}Installing JobSet CRD...${RESET}"
+	@kubectl apply --server-side -f https://github.com/kubernetes-sigs/jobset/releases/latest/download/manifests.yaml
+
+check-jobset: ## Check if JobSet CRD is present
+	@kubectl get crd jobsets.jobset.x-k8s.io >/dev/null 2>&1 && echo "${GREEN}JobSet CRD present${RESET}" || echo "${YELLOW}JobSet CRD not found. Install with: make install-jobset${RESET}"
+
+pre-flight: ## Run pre-flight checks before deploying
+	@bash ./pre-flight-check.sh
+
+validate-config: ## Ensure all placeholders in config-global.yaml are replaced
+	@bash ./validate-config.sh $(CONFIG_GLOBAL)
+
+diff: config ## Show kubectl diff for cluster overlay
+	@$(KUSTOMIZE_BUILD) ./overlays/cluster | $(KUBECTL) diff -f - || true
+
+deploy: deploy-cluster ## Deploy cluster overlay (default)
+
+deploy-cluster: config pre-flight ## Deploy cluster overlay (via deploy.sh with PVC guard)
+	@echo "${GREEN}Deploying cluster overlay...${RESET}"
+	@bash ./deploy.sh cluster
+
+status: ## Show montage-ai pod status
+	@$(KUBECTL) get pods -n $(CLUSTER_NAMESPACE)
+
+health: ## Basic health checks
+	@$(KUBECTL) get pods -n $(CLUSTER_NAMESPACE)
+	@$(KUBECTL) rollout status deployment/montage-ai-web -n $(CLUSTER_NAMESPACE) --timeout=120s || true
+
+test-e2e: ## Run E2E deploy test against ephemeral Kind cluster
+	@bash ./test-deploy-e2e.sh

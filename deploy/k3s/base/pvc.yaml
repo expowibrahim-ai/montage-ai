@@ -1,0 +1,91 @@
+---
+# Input storage for source video clips
+# storageClassName is overridden via kustomize (cluster-config.env).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: montage-input
+  namespace: montage-ai
+  labels:
+    app.kubernetes.io/name: montage-ai
+    app.kubernetes.io/component: storage
+    fluxibri.ai/tier: storage
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 50Gi
+  storageClassName: local-path
+---
+# Music storage for audio tracks
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: montage-music
+  namespace: montage-ai
+  labels:
+    app.kubernetes.io/name: montage-ai
+    app.kubernetes.io/component: storage
+    fluxibri.ai/tier: storage
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: local-path
+---
+# Assets storage for overlays, logos
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: montage-assets
+  namespace: montage-ai
+  labels:
+    app.kubernetes.io/name: montage-ai
+    app.kubernetes.io/component: storage
+    fluxibri.ai/tier: storage
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 5Gi
+  storageClassName: local-path
+---
+# Output storage for generated videos
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: montage-output
+  namespace: montage-ai
+  labels:
+    app.kubernetes.io/name: montage-ai
+    app.kubernetes.io/component: storage
+    fluxibri.ai/tier: storage
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 100Gi
+  storageClassName: local-path
+---
+# Cache for analysis (Beats, Scenes)
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: montage-cache
+  namespace: montage-ai
+  labels:
+    app.kubernetes.io/name: montage-ai
+    app.kubernetes.io/component: storage
+    fluxibri.ai/tier: storage
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 20Gi
+  storageClassName: local-path

@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% import "components/macros.html" as m %}
+
+{% block title %}Gallery - Montage AI{% endblock %}
+
+{% block content %}
+    {% call m.section_header("GALLERY", "Your completed projects. AI-directed masterpieces.") %}{% endcall %}
+
+    {% call m.empty_state("No Videos Found", "Create Montage", "/montage") %}
+        <p class="text-xs text-muted mb-8">Gallery is empty. Create a new montage to see it here.</p>
+    {% endcall %}
+{% endblock %}

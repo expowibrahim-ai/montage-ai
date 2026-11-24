@@ -1,0 +1,133 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Environments
+.env
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Media files (user provides their own)
+data/input/
+data/music/
+data/output/
+*.mp4
+*.mp3
+*.wav
+*.mov
+*.avi
+
+# Logs
+*.log
+logs/
+
+# Local business documentation (not tracked)
+# Note: Backlog/strategy docs are private by policy and must not be tracked
+/BACKLOG.md
+docs/internal/
+docs/archive/internal/
+docs/market_analysis.md
+docs/stability_report.md
+docs/integration_status_report.md
+docs/offloading_analysis.md
+docs/LEGAL_IMPLEMENTATION.md
+docs/marketing/monetization_strategy.md
+docs/marketing/social_media_strategy.md
+docs/archive/
+docs/CLEANUP.md
+docs/CLUSTER_OPTIMIZATION_PLAN.md
+docs/CODE_HEALTH.md
+docs/Developer_Build_Quickstart.md
+docs/explanation/architecture/NETWORK_ROBUSTNESS_ANALYSIS.md
+docs/MARKDOWNLINT_FIXES.md
+docs/POLISH_PLAN.md
+docs/REGISTRY_TROUBLESHOOTING.md
+docs/STABILITY_PLAN.md
+docs/STRATEGIC_BACKLOG.md
+docs/TEST_INFRA.md
+private/
+secrets/
+*.key
+*.pem
+
+
+# macOS
+.DS_Store
+
+# Temporary/Generated
+gallery_montage_*
+patch_files/
+tmp/
+tmp_test/
+downloads/
+local_downloads/
+reproduce_*.py
+verify_*.py
+benchmark_results/cluster_benchmark.json
+
+# Redis
+dump.rdb
+*.rdb
+
+# Telemetry data
+data/output/telemetry/
+
+# Test fixtures (generated via make test-fixtures)
+tests/fixtures/
+__pycache__/
+*.pyc
+*.pyo
+*.log
+.DS_Store
+*.swp
+*.swo
+*~
+.pytest_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+.venv/
+venv/
+.env
+run_log.txt
+gallery_montage_*.mp4
+
+# Security & Secrets
+*.crt
+*.key
+*.pem
+cgpu_*.js
+
+# Temporary/Debug
+debug-*.yaml
+*.report.html
+worker-deployment-*.yaml
+tmp-kubeconfig
+
+# Local deployment overlay (user-specific registry config)
+deploy/k3s/overlays/local/
+
+# Cluster-specific global config (contains internal IPs)
+deploy/k3s/config-global.yaml
+deploy/k3s/base/cluster-config.env
+.venv-ci/
+
+# Shell artifact files (broken CI/job template variable interpolation)
+# These are empty files with shell-fragment names created by broken scripts.
+# Clean up with: find . -maxdepth 1 -name ';*' -delete
+;*
+
+# Local-only Docker variant (QSV experiments)
+Dockerfile.qsv

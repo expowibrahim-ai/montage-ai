@@ -1,0 +1,29 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kaniko-montage-ai-build-local
+  namespace: montage-ai
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        fluxibri.ai/registry-access: "true"
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+        - name: kaniko
+          image: gcr.io/kaniko-project/executor:latest
+          args:
+            - --context=git://github.com/mfahsold/montage-ai.git#main
+            - --dockerfile=Dockerfile
+            - --destination=$(REGISTRY_URL)/$(IMAGE_NAME):$(IMAGE_TAG)
+            - --snapshot-mode=time
+            - --verbosity=info
+            - --custom-platform=linux/amd64
+            - --insecure
+            - --insecure-registry=$(REGISTRY_URL)
+          envFrom:
+            - configMapRef:
+                name: cluster-config

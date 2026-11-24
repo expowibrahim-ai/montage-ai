@@ -1,0 +1,117 @@
+---
+# Montage-AI Web UI Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: montage-ai-web
+  namespace: montage-ai
+  labels:
+    app.kubernetes.io/name: montage-ai
+    app.kubernetes.io/component: web-ui
+    fluxibri.ai/tier: web
+spec:
+  replicas: 1
+  revisionHistoryLimit: 3
+  progressDeadlineSeconds: 600
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: montage-ai
+      app.kubernetes.io/component: web-ui
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: montage-ai
+        app.kubernetes.io/component: web-ui
+        fluxibri.ai/tier: web
+    spec:
+      serviceAccountName: montage-ai-cluster
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            app.kubernetes.io/name: montage-ai
+            app.kubernetes.io/component: web-ui
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: montage-ai
+                  app.kubernetes.io/component: web-ui
+              topologyKey: kubernetes.io/hostname
+      containers:
+      - name: montage-ai
+        image: <IMAGE_FULL>
+        imagePullPolicy: IfNotPresent
+        command: ["python", "-u", "-m", "montage_ai.web_ui.app"]
+        ports:
+        - name: http
+          containerPort: 8080
+          protocol: TCP
+        envFrom:
+        - configMapRef:
+            name: cluster-config
+        - configMapRef:
+            name: montage-ai-config
+        env:
+        - name: FLASK_ENV
+          value: "production"
+        - name: LITELLM_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: litellm-auth
+              key: api-key
+              optional: true  # Don't fail if secret doesn't exist
+        # LiteLLM Unified Proxy endpoint (canonical fluxibri_core pattern)
+        - name: OPENAI_API_BASE
+          value: "http://litellm.llama-box-system.svc.cluster.local:4000/v1"
+        # Model auto-discovery (eco/perf/heavy models available)
+        - name: OPENAI_MODEL
+          value: "eco"
+        volumeMounts:
+        - name: data-input
+          mountPath: /data/input
+        - name: data-output
+          mountPath: /data/output
+        - name: data-music
+          mountPath: /data/music
+        - name: data-assets
+          mountPath: /data/assets
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "1"
+        livenessProbe:
+          httpGet:
+            path: /api/status
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /api/status
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+      volumes:
+      - name: data-input
+        persistentVolumeClaim:
+          claimName: montage-input
+      - name: data-output
+        persistentVolumeClaim:
+          claimName: montage-output
+      - name: data-music
+        persistentVolumeClaim:
+          claimName: montage-music
+      - name: data-assets
+        persistentVolumeClaim:
+          claimName: montage-assets

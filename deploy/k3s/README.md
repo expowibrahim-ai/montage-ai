@@ -1,0 +1,804 @@
+# Kubernetes Deployment Guide
+
+> **Single source of truth for K8s/K3s deployment.**
+
+## Quick Start
+
+```bash
+# 1. Copy and edit config (replace ALL <...> placeholders)
+cp deploy/k3s/config-global.yaml.example deploy/k3s/config-global.yaml
+$EDITOR deploy/k3s/config-global.yaml
+
+# 2. Render cluster config + validate
+make -C deploy/k3s config
+make -C deploy/k3s pre-flight    # Check tools, placeholders, cluster connectivity
+
+# 3. Build & push multi-arch image
+cd deploy/k3s
+BUILD_MULTIARCH=true ./build-and-push.sh
+
+# 3. Access Web UI (choose one)
+# If you have ingress configured:
+open "https://<MONTAGE_HOSTNAME>"
+
+# Or port-forward locally:
+CLUSTER_NAMESPACE="${CLUSTER_NAMESPACE:-montage-ai}"
+LOCAL_PORT="${LOCAL_PORT:-5000}"
+kubectl port-forward -n "$CLUSTER_NAMESPACE" svc/montage-ai-web "${LOCAL_PORT}:8080"
+open "http://localhost:${LOCAL_PORT}"
+```
+
+Note: If you build a single-arch image (amd64 only), pin workloads to that
+architecture via an overlay patch or add a node selector before deploying.
+For heterogeneous clusters, prefer a multi-arch build and set
+`cluster.allowMixedArch: true` in `deploy/k3s/config-global.yaml` (local copy from
+`config-global.yaml.example`).
+`build-and-push.sh` now auto-selects an existing native multi-arch builder
+(`montage-multiarch`, `simple-builder`, etc.) before falling back to local QEMU,
+and enables registry layer cache by default (`CACHE_REF`).
+
+Set defaults used throughout this guide:
+
+```bash
+export CLUSTER_NAMESPACE="${CLUSTER_NAMESPACE:-montage-ai}"
+export MONTAGE_HOSTNAME="${MONTAGE_HOSTNAME:-montage-ai.local}"
+```
+
+## Clean Deploy (Fluxibri-core aligned)
+
+Use the canonical, simplified deploy flow (build + push + apply overlay):
+
+If you operate the Fluxibri cluster stack, deploy core infrastructure via
+`mfahsold/fluxibri_core` first (canonical `make deploy-core`). This repo assumes
+those services are already present and focuses on the Montage-AI app layer.
+
+> **Before you start:** Replace **all** angle-bracket placeholders (`<...>`) in
+> your `config-global.yaml`. Unreplaced placeholders cause invalid hostnames and
+> deploy failures. See the "Pre-Deploy Checklist" section below.
+
+```bash
+# Copy and edit canonical config (local copy is ignored by git)
+cp deploy/k3s/config-global.yaml.example deploy/k3s/config-global.yaml
+$EDITOR deploy/k3s/config-global.yaml
+
+# Render cluster-config.env
+make -C deploy/k3s config
+
+# Build & push
+cd deploy/k3s
+./build-and-push.sh
+
+# Deploy cluster overlay (canonical)
+./deploy.sh cluster
+
+# Bootstrap storage and initialize .ready markers
+./bootstrap.sh
+```
+
+Notes:
+
+- Update your local `deploy/k3s/config-global.yaml` to change registry, tag, or storage defaults.
+- `make -C deploy/k3s config` regenerates `deploy/k3s/base/cluster-config.env`.
+- `./bootstrap.sh` creates NFS markers and initializes storage for proper pod startup.
+
+That's it. For manual control, see sections below.
+
+---
+
+## Prerequisites Checklist
+
+**Before deploying to Kubernetes, verify you have:**
+
+- [ ] Kubernetes cluster (K3s, K8s, EKS, GKE, etc.)
+- [ ] `kubectl` configured with cluster access:
+  ```bash
+  kubectl cluster-info   # Should show cluster address
+  kubectl get nodes      # Should list your worker nodes
+  ```
+- [ ] Container registry accessible from cluster (ghcr.io, ECR, local registry, etc.)
+- [ ] **Storage setup** (see "NFS Prerequisites" section below)
+- [ ] Cluster resources: ≥ 16 GB RAM, ≥ 4 CPUs available
+
+### Quick Local Cluster Setup (Testing)
+
+If no cluster is available, use one of these options:
+
+**Option A: k3d (Docker-based K3s)**
+```bash
+curl -s https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash
+k3d cluster create montage-ai --agents 2 -p "8080:80@loadbalancer" -p "8443:443@loadbalancer"
+kubectl cluster-info
+```
+
+**Option B: minikube**
+```bash
+minikube start --cpus=4 --memory=16384 --addons storage-provisioner
+minikube addons enable nfs-provisioner
+```
+
+**Option C: Kind (Kubernetes in Docker)**
+```bash
+kind create cluster --name montage-ai
+kubectl cluster-info
+```
+
+### NFS Prerequisites
+
+**Why NFS?** The render pods need persistent, shared storage for `/data/input`, `/data/music`, `/data/output`, and `/data/assets`.
+
+**Check if your cluster already has storage:**
+
+```bash
+# List available storage classes
+kubectl get storageclass
+
+# Desired output: At least one class with RWX (ReadWriteMany) capability
+# Example:
+#   NAME                    PROVISIONER       RECLAIMPOLICY  AVAILABLE
+#   nfs-provisioner         nfs.io/nfs        Delete         True
+#   local-path (default)    rancher.io/local  Delete         True
+```
+
+**If NO storage class exists:** Deploy NFS provisioner
+
+```bash
+# Option A: Local-path provisioner (single-node clusters, testing)
+kubectl apply -f https://raw.githubusercontent.com/rancher/local-path-provisioner/master/deploy/local-path-storage.yaml
+
+# Option B: External NFS server (production)
+# Contact your cluster admin to mount an NFS share, then:
+helm install nfs-provisioner stable/nfs-provisioner \
+  --set nfs.server=<NFS_SERVER_IP> \
+  --set nfs.path=/exports/montage-ai
+
+# Verify storage is ready:
+kubectl get storageclass
+kubectl get pvc -n montage-ai  # After deploy, should show: input, output, music, assets
+```
+
+### Bootstrap Script (Required After First Deploy)
+
+Always run `bootstrap.sh` after your initial deployment:
+
+```bash
+./deploy/k3s/bootstrap.sh
+```
+
+**What it does:**
+- Verifies all PVCs are bound and healthy
+- Creates `.ready` markers on shared storage (required for init containers)
+- Pre-provisions data directories (`/data/input`, `/data/output`, `/data/music`, `/data/assets`)
+- Shows deployment access instructions
+
+**When to run it:**
+- After first `./deploy.sh cluster` or `make deploy-cluster`
+- After recreating PVCs or storage
+- If pods are stuck in `Init:0/2` state
+
+### The `.ready` File Issue
+
+**Problem:** Your render job stays in `Init:0/2` status.
+
+**Cause:** The init container is waiting for `/data/input/.ready` file, which signals that NFS is mounted and ready.
+
+**Solution:**
+
+**Automated (Recommended):**
+```bash
+# Run bootstrap script after deployment to create .ready markers
+./deploy/k3s/bootstrap.sh
+```
+
+This script:
+- Verifies all PVCs are bound
+- Creates `.ready` markers in storage
+- Verifies the deployment is ready
+- Shows access instructions
+
+**Manual (if needed):**
+
+```bash
+# Check if NFS is mounted
+kubectl exec -it -n montage-ai <POD_NAME> -- ls -la /data/input/
+# If empty or shows permission denied → NFS not ready yet
+
+# Manually trigger .ready file
+kubectl exec -it -n montage-ai <POD_NAME> -- touch /data/input/.ready
+
+# Restart the job
+kubectl rollout restart job/montage-ai-render -n montage-ai
+kubectl wait --for=condition=complete job/montage-ai-render -n montage-ai --timeout=600s
+```
+
+**Best Practice:** Always run `./bootstrap.sh` after `./deploy.sh` to ensure proper initialization. If jobs consistently fail on `.ready` check:
+```bash
+# Debug NFS mounts
+kubectl describe pod <POD_NAME> -n montage-ai | grep -A 5 "Mounts:"
+
+# Check init container logs
+kubectl logs <POD_NAME> -c wait-for-nfs-ready -n montage-ai
+```
+
+## Prerequisites
+
+- Kubernetes cluster (K3s, K8s, EKS, GKE, etc.)
+- `kubectl` configured with cluster access
+- Container registry accessible from cluster
+
+## Directory Structure
+
+```
+deploy/k3s/
+├── base/                    # Canonical cluster manifests (cluster-agnostic)
+│   ├── namespace.yaml       # montage-ai namespace
+│   ├── cluster-config.env   # Rendered from config-global.yaml
+│   ├── deployment.yaml      # Web UI deployment
+│   ├── worker.yaml          # Queue workers (single adaptive tier)
+│   ├── pvc.yaml             # Storage claims (RWX-friendly)
+│   ├── network-policy.yaml  # Default-deny + explicit ingress/egress allows
+│   ├── monitoring.yaml      # ServiceMonitor + PrometheusRule
+│   └── kustomization.yaml   # Base kustomization
+└── overlays/
+    ├── cluster/             # Canonical cluster overlay
+    └── legacy/              # Archived overlays (reference only)
+```
+
+---
+
+## Rendering Image Placeholders
+
+Some manifests use `<IMAGE_FULL>` placeholders (jobs and patches). Render them
+with the shared image resolver:
+
+```bash
+./scripts/render-image.sh deploy/k3s/job-documentary-trailer.yaml > /tmp/job.yaml
+kubectl apply -f /tmp/job.yaml
+```
+
+---
+
+## Deployment Commands
+
+### Option 1: Makefile (Recommended)
+
+```bash
+# Render cluster config
+make -C deploy/k3s config
+
+# Deploy canonical cluster overlay
+make -C deploy/k3s deploy-cluster
+```
+
+### Option 2: Shell Scripts
+
+```bash
+cd deploy/k3s
+
+# Build & push to cluster registry
+./build-and-push.sh
+
+# If your registry is HTTP (insecure), ensure buildx uses the local config:
+# - Verify buildkitd.toml has [registry."HOST:PORT"] http=true/insecure=true
+# - Recreate the builder once if needed:
+#   FORCE_BUILDER_RECREATE=true ./build-and-push.sh
+
+# Deploy (canonical cluster overlay)
+./deploy.sh cluster
+
+# Undeploy
+./undeploy.sh
+```
+
+### Option 3: kubectl/kustomize Direct
+
+```bash
+# Render cluster-config.env first
+make -C deploy/k3s config
+
+# Canonical cluster deployment
+kubectl apply -k deploy/k3s/overlays/cluster/
+```
+
+---
+
+## Canonical Deployment
+
+Montage‑AI supports exactly two deployment modes:
+
+- **Local**: run via Docker Compose (`docker compose up`).
+- **Cluster**: deploy `deploy/k3s/overlays/cluster/` (Kustomize).
+
+Legacy overlays are preserved in `deploy/k3s/overlays/legacy/` for reference only.
+
+## GPU Acceleration
+
+### Available GPU Resources
+
+| Node (example) | GPU Type | Resource Key | Encoder |
+|------|----------|--------------|---------|
+| gpu-node-nvidia | NVIDIA Jetson | `nvidia.com/gpu: 1` | NVENC |
+| gpu-node-amd | AMD Radeon | `amd.com/gpu: 1` | VAAPI |
+
+### GPU Enablement (Cluster-Agnostic)
+
+```bash
+# Check available GPUs
+kubectl get nodes -o custom-columns='NAME:.metadata.name,NVIDIA:.status.allocatable.nvidia\.com/gpu,AMD:.status.allocatable.amd\.com/gpu'
+
+# Use your cluster's device plugins (NVIDIA/AMD/Jetson) and taints/tolerations.
+# The canonical cluster overlay avoids hardcoded node names.
+#
+# Legacy GPU overlays are archived in:
+#   deploy/k3s/overlays/legacy/
+```
+
+---
+
+## LLM Inference (Fluxibri LiteLLM)
+
+When deployed on a Fluxibri cluster, the Creative Director uses the **LiteLLM Unified
+Proxy** as its OpenAI-compatible backend. This is configured in `config-global.yaml`:
+
+```yaml
+llm:
+  openaiApiBase: "http://litellm.llama-box-system.svc.cluster.local:4000/v1"
+  openaiApiKey: "sk-1234"
+  openaiModel: "auto"          # discovers model via /v1/models (DRY)
+  openaiVisionModel: "auto"    # Performance tier for vision tasks
+```
+
+**Tiered routing** is handled transparently by LiteLLM:
+
+| Tier | Model Class | Use Case |
+|------|-------------|----------|
+| Eco | 0.5B | Classification, simple extraction |
+| Performance | 2B-VL (Qwen2-VL) | Vision analysis, standard reasoning |
+| Distributed | 32B | Deep reasoning, complex planning |
+
+Model names are **runtime state** — set `openaiModel: "auto"` and the Creative
+Director discovers available models via `/v1/models`. See
+[fluxibri_core LLM_API_USAGE.md](https://github.com/mfahsold/fluxibri_core/blob/main/docs/2_how-to/dev/LLM_API_USAGE.md)
+for full documentation.
+
+---
+
+## CGPU (Cloud GPU Offload)
+
+Montage‑AI can offload heavy GPU tasks (final encode, upscale, voice isolation) to CGPU/Colab
+when enabled. In cluster mode, the worker pods must have CGPU credentials mounted.
+
+### 1) Create the credentials secret
+
+```bash
+kubectl -n "${CLUSTER_NAMESPACE:-montage-ai}" create secret generic cgpu-credentials \
+  --from-file=config.json=/path/to/cgpu/config.json \
+  --from-file=session.json=/path/to/cgpu/session.json
+```
+
+You can automate this with:
+
+```bash
+./scripts/ops/cgpu-refresh-session.sh
+```
+
+### 2) Enable CGPU in cluster config
+
+Set these in `deploy/config.env` (or export in your shell before `make -C deploy/k3s config`):
+
+```bash
+CGPU_ENABLED=true
+CGPU_GPU_ENABLED=true
+CGPU_HOST=cgpu-server.montage-ai.svc.cluster.local
+FINAL_ENCODE_BACKEND=router
+```
+
+Then re-render + deploy:
+
+```bash
+make -C deploy/k3s config
+make -C deploy/k3s deploy-cluster
+```
+
+If the secret is missing, CGPU checks will fail fast and the system will fall back to local CPU/GPU.
+
+---
+
+## Pre-Deploy Checklist
+
+Before running `make deploy-cluster` or `./deploy.sh cluster`, verify:
+
+1. **All placeholders replaced** — no `<...>` tokens remain in your
+   `config-global.yaml`:
+   ```bash
+   grep -n '<[A-Z_]*>' deploy/k3s/config-global.yaml && echo "FIX THESE" || echo "OK"
+   ```
+
+2. **Hostname is valid RFC1123** — `cluster.hostnames.montage` must contain
+   only lowercase letters, digits, `-` and `.` (e.g. `montage-ai.example.com`).
+   If you don't need Ingress, you can set it to `montage-ai.local` and use
+   port-forwarding instead.
+   ```yaml
+   # Valid hostnames:
+   montage: "montage-ai.local"
+   montage: "app.prod.example.com"
+
+   # Invalid (will fail in Ingress):
+   # montage: "montage_ai.local"    # underscores not allowed
+   # montage: "Montage-AI.local"    # uppercase not allowed
+   ```
+
+3. **Storage class matches existing PVCs** — Kubernetes PVC spec fields
+   (`storageClassName`, `accessModes`, storage size) are **immutable** after
+   creation. If PVCs already exist in your cluster, set `storage.classes.default`
+   to match:
+   ```bash
+   # Check existing PVCs
+   kubectl get pvc -n montage-ai -o custom-columns=\
+   'NAME:.metadata.name,CLASS:.spec.storageClassName,ACCESS:.spec.accessModes[0],SIZE:.spec.resources.requests.storage'
+   ```
+   If you see mismatches, either update `config-global.yaml` to match the
+   existing values, or delete the old PVCs first (`kubectl delete pvc <name>
+   -n montage-ai` — **this deletes data**).
+
+---
+
+## Storage Configuration
+
+### Local Storage (Single Node)
+
+Default is controlled by `deploy/k3s/config-global.yaml` via `STORAGE_CLASS_DEFAULT`.
+For multi-node clusters, prefer an RWX-capable storage class (e.g., NFS/CSI).
+
+```yaml
+# In config-global.yaml
+storage:
+  classes:
+    default: "<RWX_STORAGE_CLASS>"
+  pvc:
+    input: "montage-ai-input-nfs"
+    output: "montage-ai-output-nfs"
+    music: "montage-ai-music-nfs"
+    assets: "montage-ai-assets-nfs"
+```
+
+The canonical deploy flow is idempotent. `deploy/k3s/deploy.sh` skips applying
+PVCs that already exist, and uses `storage.pvc` names when wiring volumes. Set
+these names to match existing claims to avoid immutable PVC conflicts.
+
+### NFS Storage (Multi-Node)
+
+Provision an RWX storage class via your cluster (NFS/CSI), then set it in
+`deploy/k3s/config-global.yaml`.
+
+If you already have dedicated PVCs (RWX split), set the PVC names under
+`storage.pvc` and they will be propagated to `cluster-config.env` for
+distributed jobs.
+
+---
+
+## Node Labels (Optional)
+
+Apply these labels so overlays can schedule without hardcoded hostnames:
+
+```bash
+# Storage (hostPath PVs)
+kubectl label node <node> fluxibri.ai/storage-primary=true
+
+# Registry hosting + build access
+kubectl label node <node> fluxibri.ai/registry-host=true
+kubectl label node <node> fluxibri.ai/registry-access=true
+
+# Optional GPU hints (if your cluster uses these labels)
+kubectl label node <node> fluxibri.ai/gpu-type=amd-rocm
+kubectl label node <node> fluxibri.ai/gpu-type=nvidia-tegra
+```
+
+---
+
+## Access Methods
+
+### Port Forward (Development)
+
+```bash
+CLUSTER_NAMESPACE="${CLUSTER_NAMESPACE:-montage-ai}"
+LOCAL_PORT="${LOCAL_PORT:-5000}"
+kubectl port-forward -n "$CLUSTER_NAMESPACE" svc/montage-ai-web "${LOCAL_PORT}:8080"
+open "http://localhost:${LOCAL_PORT}"
+```
+
+### Ingress (Production)
+
+```bash
+# Ensure DNS/hosts entry exists
+echo "YOUR_CLUSTER_IP  <MONTAGE_HOSTNAME>" | sudo tee -a /etc/hosts
+
+open "http://<MONTAGE_HOSTNAME>"
+```
+
+---
+
+## Running Render Jobs (Canonical)
+
+Jobs are submitted via the API (same path used by the Web UI).
+
+```bash
+# Submit a job via API
+python3 -m montage_ai.cli jobs --api-base http://<montage-service> submit \
+  --style cinema_trailer \
+  --option options.target_duration=30 \
+  --option options.llm_clip_selection=true
+
+# Inspect status
+python3 -m montage_ai.cli jobs --api-base http://<montage-service> status <JOB_ID>
+```
+
+---
+
+## Distributed Jobs (Cluster Mode)
+
+Cluster-mode jobs (scene detection + distributed render) use the in-cluster
+Kubernetes API and require:
+
+- `deploy/k3s/base/cluster-rbac.yaml` applied (includes `jobs`, `jobs/status`,
+  and `configmaps` permissions).
+- ServiceAccount `montage-ai-cluster` (already in `cluster-rbac.yaml`).
+- If JobSet CRD is **not** installed, the system falls back to standard Jobs.
+
+### Required Cluster Env (for in-cluster jobs)
+
+These values are read by the job submitter. Prefer configuring them in
+`deploy/k3s/config-global.yaml` (rendered into `cluster-config.env`).
+
+- `REGISTRY_HOST` / `REGISTRY_PORT` (or `REGISTRY_URL`)
+- `IMAGE_NAME` / `IMAGE_TAG`
+- `PVC_INPUT_NAME`, `PVC_OUTPUT_NAME`, `PVC_MUSIC_NAME`, `PVC_ASSETS_NAME`
+- `WORKER_QUEUE_LIST_NAME`, `WORKER_QUEUE_SCALE_THRESHOLD`
+- `WORKER_MIN_REPLICAS`, `WORKER_MAX_REPLICAS`
+- `CLUSTER_PARALLELISM`, `MAX_SCENE_WORKERS`, `MAX_PARALLEL_JOBS`, `FFMPEG_THREADS`
+
+Example `cluster-config.env` excerpt:
+
+```env
+REGISTRY_URL=<REGISTRY_HOST>:<REGISTRY_PORT>
+IMAGE_NAME=montage-ai
+IMAGE_TAG=latest
+PVC_INPUT_NAME=montage-ai-input-nfs
+PVC_OUTPUT_NAME=montage-ai-output-nfs
+PVC_MUSIC_NAME=montage-ai-music-nfs
+PVC_ASSETS_NAME=montage-ai-assets-nfs
+WORKER_QUEUE_LIST_NAME=rq:queue:default:intermediate
+WORKER_QUEUE_SCALE_THRESHOLD=4
+WORKER_MIN_REPLICAS=3
+WORKER_MAX_REPLICAS=24
+CLUSTER_PARALLELISM=24
+MAX_SCENE_WORKERS=24
+MAX_PARALLEL_JOBS=24
+FFMPEG_THREADS=16
+```
+
+### Performance Tuning (Recommended)
+
+For large AV1/4K inputs, scene detection is CPU‑bound. Use a larger tier and
+shared proxy cache to avoid repeated decodes:
+
+```env
+SCENE_DETECT_TIER=xlarge
+SCENE_CACHE_DIR=/data/output/scene_cache
+PROXY_CACHE_DIR=/data/output/proxy_cache
+CLUSTER_PARALLELISM=24
+MAX_SCENE_WORKERS=24
+MAX_PARALLEL_JOBS=24
+FFMPEG_THREADS=16
+```
+
+Notes:
+- `CLUSTER_PARALLELISM` controls shard count for distributed jobs.
+- KEDA scales workers based on `WORKER_QUEUE_LIST_NAME`; keep this aligned with the queue name used by the web/API process.
+- If KEDA does not scale, verify `ScaledObject` health with `kubectl -n montage-ai describe scaledobject montage-ai-worker-scaler`.
+- With a single video, time‑based sharding is automatic; for mixed inputs, consider
+  pre‑splitting very large files to balance load.
+
+### Example (ad‑hoc job)
+
+```yaml
+spec:
+  template:
+    spec:
+      serviceAccountName: montage-ai-cluster
+      containers:
+        - name: montage-ai
+          env:
+            - name: REGISTRY_HOST
+              value: <REGISTRY_HOST>
+            - name: REGISTRY_PORT
+              value: "30500"
+            - name: PVC_INPUT_NAME
+              value: montage-ai-input-nfs
+```
+
+---
+
+## Editing Styles
+
+| Style | Description |
+|-------|-------------|
+| `dynamic` | Fast cuts, high energy (default) |
+| `hitchcock` | Suspenseful, methodical pacing |
+| `mtv` | Music video, beat-synchronized |
+| `action` | Quick cuts, action sequences |
+| `documentary` | Slower, informative |
+| `minimalist` | Clean, simple |
+| `wes_anderson` | Symmetric, stylized |
+
+---
+
+## Operations
+
+### View Logs
+
+```bash
+kubectl logs -n "$CLUSTER_NAMESPACE" -l app.kubernetes.io/name=montage-ai -f
+```
+
+### Restart Deployment
+
+```bash
+kubectl rollout restart deployment/montage-ai-web -n "$CLUSTER_NAMESPACE"
+```
+
+### Scale
+
+```bash
+# Stop
+kubectl scale deployment montage-ai-web -n "$CLUSTER_NAMESPACE" --replicas=0
+
+# Start
+kubectl scale deployment montage-ai-web -n "$CLUSTER_NAMESPACE" --replicas=1
+```
+
+### Shell Access
+
+```bash
+kubectl exec -it -n "$CLUSTER_NAMESPACE" deployment/montage-ai-web -- /bin/bash
+```
+
+### Check Resource Usage
+
+```bash
+kubectl top pods -n "$CLUSTER_NAMESPACE"
+kubectl top nodes
+```
+
+---
+
+## Node Benchmarking
+
+Use a lightweight benchmark job to label nodes with a performance multiplier
+for task routing (label: `montage-ai/bench-score`).
+
+```bash
+python3 ./scripts/benchmarks/run_cluster_benchmark.py --namespace "$CLUSTER_NAMESPACE"
+```
+
+---
+
+## Troubleshooting
+
+### Pod Not Starting
+
+```bash
+# Check events
+kubectl describe pod -n "$CLUSTER_NAMESPACE" -l app.kubernetes.io/name=montage-ai
+
+# Check logs
+kubectl logs -n "$CLUSTER_NAMESPACE" -l app.kubernetes.io/name=montage-ai --previous
+```
+
+### Image Pull Errors
+
+```bash
+# Verify image exists in registry
+curl "http://<REGISTRY_URL>/v2/<IMAGE_NAME>/tags/list"
+
+# Check pod image
+kubectl get pod -n "$CLUSTER_NAMESPACE" -o jsonpath='{.items[0].spec.containers[0].image}'
+```
+
+### Existing PVC Conflicts
+
+If you see "PVC already exists" or immutable field errors:
+
+```bash
+# 1. Check existing PVCs and their storage classes
+kubectl get pvc -n "$CLUSTER_NAMESPACE" -o custom-columns=\
+'NAME:.metadata.name,CLASS:.spec.storageClassName,ACCESS:.spec.accessModes[0],SIZE:.spec.resources.requests.storage'
+
+# 2. Either update config-global.yaml to match existing names:
+#    storage.pvc.input: "existing-pvc-name"
+#
+#    Or delete old PVCs and redeploy (WARNING: data loss!)
+#    kubectl delete pvc <name> -n "$CLUSTER_NAMESPACE"
+```
+
+### Storage Issues
+
+```bash
+# Check PVC status (all should be "Bound")
+kubectl get pvc -n "$CLUSTER_NAMESPACE"
+
+# Check disk usage in pod
+kubectl exec -n "$CLUSTER_NAMESPACE" deployment/montage-ai-web -- df -h /data/
+```
+
+### Network Issues
+
+```bash
+# Test DNS from pod
+kubectl exec -n "$CLUSTER_NAMESPACE" deployment/montage-ai-web -- nslookup google.com
+
+# Check network policies
+kubectl get networkpolicy -n "$CLUSTER_NAMESPACE"
+```
+
+---
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Kubernetes Cluster                       │
+├─────────────────────────────────────────────────────────────┤
+│  ┌─────────────┐     ┌─────────────────────────────────┐   │
+│  │  ConfigMap  │────▶│        montage-ai Pod           │   │
+│  │  (settings) │     │  ┌─────────────────────────┐    │   │
+│  └─────────────┘     │  │   montage-ai container  │    │   │
+│                      │  │   - Flask Web UI        │    │   │
+│  ┌─────────────┐     │  │   - FFmpeg              │    │   │
+│  │ PVC: input  │────▶│  │   - Python ML           │    │   │
+│  │ (footage)   │     │  └─────────────────────────┘    │   │
+│  └─────────────┘     └──────────────┬──────────────────┘   │
+│  ┌─────────────┐                    │                      │
+│  │ PVC: music  │────────────────────┤                      │
+│  └─────────────┘                    │                      │
+│  ┌─────────────┐                    │                      │
+│  │ PVC: output │◀───────────────────┘                      │
+│  └─────────────┘                                           │
+└─────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Post-Deploy Verification
+
+After deploying, verify the cluster is healthy:
+
+```bash
+# All pods should be Running (no CrashLoopBackOff or ImagePullBackOff)
+kubectl get pods -n "$CLUSTER_NAMESPACE"
+
+# All PVCs should be Bound
+kubectl get pvc -n "$CLUSTER_NAMESPACE"
+
+# Check resource usage
+kubectl top pods -n "$CLUSTER_NAMESPACE"
+kubectl top nodes
+
+# Test rollback/recovery
+kubectl rollout restart deployment/montage-ai-web -n "$CLUSTER_NAMESPACE"
+kubectl get pods -n "$CLUSTER_NAMESPACE"  # should recover within 30s
+```
+
+**Acceptance Criteria:**
+- [ ] Pre-flight checks pass (`make -C deploy/k3s pre-flight`)
+- [ ] All pods in Running state
+- [ ] Web UI accessible (port-forward or ingress)
+- [ ] Test render job completes successfully
+- [ ] Data persists across pod restarts
+
+---
+
+## Related Documentation
+
+- **[Configuration Reference](../CONFIGURATION.md)** — Environment variables
+- **[Kubernetes Runbook](../../docs/KUBERNETES_RUNBOOK.md)** — Operations (public stub; internal runbook on request)
+- **[Getting Started](../../docs/getting-started.md)** — Local development setup

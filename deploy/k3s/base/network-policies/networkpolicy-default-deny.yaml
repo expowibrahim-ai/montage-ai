@@ -1,0 +1,91 @@
+# Default deny - block all inbound traffic
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: montage-ai
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+---
+# Allow internal traffic inside the namespace
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-same-namespace
+  namespace: montage-ai
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: montage-ai
+---
+# Allow DNS resolution
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns
+  namespace: montage-ai
+spec:
+  podSelector: {}
+  policyTypes:
+  - Egress
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+---
+# Allow egress to private registry
+# UPDATE: Replace REGISTRY_IP with your registry server IP
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-registry-egress
+  namespace: montage-ai
+spec:
+  podSelector: {}
+  policyTypes:
+  - Egress
+  egress:
+  - to:
+    # UPDATE: Your registry IP (e.g., 10.0.0.10/32)
+    - ipBlock:
+        cidr: 0.0.0.0/0  # Allow all - restrict in production
+    ports:
+    - protocol: TCP
+      port: 5000  # Standard registry port
+---
+# Allow egress to GitHub for Kaniko builds
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-github-egress
+  namespace: montage-ai
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: builder
+  policyTypes:
+  - Egress
+  egress:
+  - to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+        except:
+        - 10.0.0.0/8
+        - 172.16.0.0/12
+        - 192.168.0.0/16
+    ports:
+    - protocol: TCP
+      port: 443

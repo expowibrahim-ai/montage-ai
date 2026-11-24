@@ -1,0 +1,144 @@
+---
+# Global Configuration Values for Montage-AI K3s/K8s
+# Copy to deploy/k3s/config-global.yaml and update for your environment.
+# DRY: single source of truth for registry, cluster, storage, and image defaults.
+#
+# WARNING: You MUST replace ALL angle-bracket placeholders (<...>) before running
+# `make -C deploy/k3s config`. Unreplaced placeholders will cause deploy failures
+# (e.g. invalid RFC1123 hostnames in Ingress resources).
+
+registry:
+  # Examples:
+  #   Local K3s registry: host: "192.168.1.12", port: 30500, url: "192.168.1.12:30500"
+  #   ghcr.io:            host: "ghcr.io",      port: "",    url: "ghcr.io/your-org"
+  #   Docker Hub:          host: "docker.io",    port: "",    url: "docker.io/your-user"
+  host: "<REGISTRY_HOST>"
+  port: "<REGISTRY_PORT>"
+  url: "<REGISTRY_URL>"
+  namespace: "registry"
+  images:
+    montage_ai: "<REGISTRY_URL>/montage-ai"
+
+cluster:
+  namespace: "<CLUSTER_NAMESPACE>"       # e.g. montage-ai, default, prod-montage
+  clusterDomain: "<CLUSTER_DOMAIN>"      # e.g. cluster.local (K3s/K8s default)
+  parallelism: 24
+  renderTier: "xlarge"
+  sceneDetectTier: "xlarge"
+  workerMinReplicas: 3
+  workerMaxReplicas: 24
+  workerQueueScaleThreshold: 4
+  workerQueueListName: "rq:queue:default:intermediate"
+  maxSceneWorkers: 24
+  maxParallelJobs: 24
+  ffmpegThreads: "16"
+  workerResources:
+    cpuRequest: "1000m"
+    cpuLimit: "16"
+    memoryRequest: "2Gi"
+    memoryLimit: "24Gi"
+  hostnames:
+    # Replace with your actual domain. Must be a valid RFC1123 hostname
+    # (only lowercase alphanumeric, '-' and '.'; no angle brackets).
+    montage: "montage-ai.local"
+  nodes:
+    # ⚠️  CRITICAL: Verify architecture BEFORE deploying!
+    # Wrong architecture causes ImagePullBackOff errors (wrong image platform).
+    #
+    # To check your cluster:
+    #   kubectl get nodes -o wide              # See ARCH column
+    #   kubectl get node <name> -o jsonpath='{.status.nodeInfo.architecture}'
+    #
+    # Common values: "amd64" (x86_64), "arm64" (Apple Silicon, Snapdragon, Raspberry Pi)
+    - name: "control-plane"
+      ip: "<CONTROL_PLANE_IP>"
+      arch: "arm64"              # Verify with: kubectl get node <name> -o jsonpath='{.status.nodeInfo.architecture}'
+      role: "control-plane"
+    - name: "gpu-node"
+      ip: "<GPU_NODE_IP>"
+      arch: "amd64"
+      gpu: "amd-rocm"
+      role: "worker"
+
+storage:
+  classes:
+    # IMPORTANT: If PVCs already exist in your cluster, set 'default' to match
+    # their storageClassName exactly. Kubernetes PVC spec fields (storageClassName,
+    # accessModes, storage size) are IMMUTABLE after creation. Mismatches will
+    # cause deploy failures. Check with: kubectl get pvc -n montage-ai -o yaml
+    #
+    # Single-node (minikube, k3s localhost): "local-path" is fine.
+    # Multi-node clusters: use an RWX-capable class (nfs-client, rook-ceph, etc.)
+    #   because multiple pods need ReadWriteMany access to shared storage.
+    default: "local-path"
+    nfs: "nfs-client"
+  nfs:
+    server: "<NFS_SERVER_IP>"
+    path: "/mnt/nfs-montage"
+  pvc:
+    # Set these to match existing PVC names to avoid immutable PVC conflicts.
+    # If PVCs already exist with different names, either use those names here
+    # or delete the old PVCs first (data loss!) and let the deploy create new ones.
+    input: "montage-ai-input-nfs"
+    output: "montage-ai-output-nfs"
+    music: "montage-ai-music-nfs"
+    assets: "montage-ai-assets-nfs"
+
+llm:
+  # LLM inference backend for Creative Director.
+  # Leave empty for a minimal "getting started" deployment (no LLM errors).
+  # When you have an LLM proxy, set the URL here:
+  #   openaiApiBase: "http://litellm.llama-box-system.svc.cluster.local:4000/v1"
+  # See: mfahsold/fluxibri_core DEVELOPER_QUICKSTART.md and docs/2_how-to/dev/LLM_API_USAGE.md
+  #
+  # Model selection: set to "auto" to discover available models at runtime via /v1/models.
+  # Do NOT hardcode model names — they are runtime state.
+  openaiApiBase: ""                   # Empty = no LLM; set to your LiteLLM/OpenAI URL
+  openaiApiKey: ""
+  openaiModel: "auto"                 # auto-discovers via /v1/models (DRY)
+  openaiVisionModel: "auto"           # Performance tier (Qwen2-VL) for vision tasks
+  ollamaHost: ""                      # Optional: local Ollama fallback
+  cgpuEnabled: ""                     # Optional: cloud GPU burst via cgpu
+
+images:
+  montage_ai:
+    name: "montage-ai"
+    tag: "latest"
+
+resources:
+  tiers:
+    minimal:
+      requests:
+        cpu: "10m"
+        memory: "32Mi"
+      limits:
+        cpu: "100m"
+        memory: "128Mi"
+    small:
+      requests:
+        cpu: "100m"
+        memory: "256Mi"
+      limits:
+        cpu: "500m"
+        memory: "1Gi"
+    medium:
+      requests:
+        cpu: "500m"
+        memory: "1Gi"
+      limits:
+        cpu: "2"
+        memory: "4Gi"
+    large:
+      requests:
+        cpu: "2"
+        memory: "4Gi"
+      limits:
+        cpu: "8"
+        memory: "16Gi"
+    gpu:
+      requests:
+        cpu: "1"
+        memory: "4Gi"
+      limits:
+        cpu: "16"
+        memory: "32Gi"

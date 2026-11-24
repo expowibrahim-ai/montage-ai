@@ -1,0 +1,667 @@
+"""
+cgpu Utilities - Shared Cloud GPU Functions
+
+Centralized utilities for cgpu (github.com/RohanAdwankar/cgpu) integration.
+All modules that need cloud GPU access should import from here.
+
+Features:
+- Unified cgpu command execution
+- File upload/download via base64
+- Environment checking
+- Error handling and retry logic
+
+Used by:
+- cgpu_upscaler.py (Real-ESRGAN)
+- transcriber.py (Whisper transcription)
+- video_agent.py (VQA on cloud if needed)
+"""
+
+import os
+import subprocess
+import base64
+import tempfile
+import time
+import threading
+from contextlib import contextmanager
+from typing import Tuple, Optional
+from pathlib import Path
+from dataclasses import dataclass, field
+
+from .logger import logger
+from .utils import file_size_mb
+from .config import get_settings
+
+
+# ============================================================================
+# Configuration (from environment)
+# ============================================================================
+
+def _refresh_from_settings() -> None:
+    """Sync cgpu defaults from centralized settings."""
+    global CGPU_GPU_ENABLED, CGPU_TIMEOUT, CGPU_ENABLED, CGPU_HOST, CGPU_PORT, CGPU_MODEL, CGPU_MAX_CONCURRENCY
+    global CGPU_STATUS_TIMEOUT, CGPU_GPU_CHECK_TIMEOUT
+    llm = get_settings().llm
+    CGPU_GPU_ENABLED = llm.cgpu_gpu_enabled
+    CGPU_TIMEOUT = llm.cgpu_timeout
+    CGPU_ENABLED = llm.cgpu_enabled
+    CGPU_HOST = llm.cgpu_host
+    CGPU_PORT = str(llm.cgpu_port)
+    CGPU_MODEL = llm.cgpu_model
+    CGPU_MAX_CONCURRENCY = max(1, llm.cgpu_max_concurrency)
+    CGPU_STATUS_TIMEOUT = getattr(llm, "cgpu_status_timeout", CGPU_STATUS_TIMEOUT)
+    CGPU_GPU_CHECK_TIMEOUT = getattr(llm, "cgpu_gpu_check_timeout", CGPU_GPU_CHECK_TIMEOUT)
+
+
+CGPU_STATUS_TIMEOUT = int(os.environ.get("CGPU_STATUS_TIMEOUT", "30"))
+CGPU_GPU_CHECK_TIMEOUT = int(os.environ.get("CGPU_GPU_CHECK_TIMEOUT", "120"))
+
+_refresh_from_settings()
+
+
+@dataclass
+class CGPUConfig:
+    """Configuration container for cgpu settings."""
+    gpu_enabled: bool = field(default_factory=lambda: get_settings().llm.cgpu_gpu_enabled)
+    timeout: int = field(default_factory=lambda: get_settings().llm.cgpu_timeout)
+    llm_enabled: bool = field(default_factory=lambda: get_settings().llm.cgpu_enabled)
+    host: str = field(default_factory=lambda: get_settings().llm.cgpu_host)
+    port: str = field(default_factory=lambda: str(get_settings().llm.cgpu_port))
+    model: str = field(default_factory=lambda: get_settings().llm.cgpu_model)
+    max_concurrency: int = field(default_factory=lambda: max(1, get_settings().llm.cgpu_max_concurrency))
+    status_timeout: int = field(default_factory=lambda: int(getattr(get_settings().llm, "cgpu_status_timeout", CGPU_STATUS_TIMEOUT)))
+    gpu_check_timeout: int = field(default_factory=lambda: int(getattr(get_settings().llm, "cgpu_gpu_check_timeout", CGPU_GPU_CHECK_TIMEOUT)))
+
+
+# ============================================================================
+# cgpu Concurrency Control
+# ============================================================================
+
+_CGPU_SEMAPHORE = threading.BoundedSemaphore(CGPU_MAX_CONCURRENCY)
+_CGPU_SLOT_STATE = threading.local()
+
+
+@contextmanager
+def cgpu_slot() -> None:
+    """Acquire a cgpu slot with re-entrant support per thread."""
+    depth = getattr(_CGPU_SLOT_STATE, "depth", 0)
+    if depth == 0:
+        _CGPU_SEMAPHORE.acquire()
+    _CGPU_SLOT_STATE.depth = depth + 1
+    try:
+        yield
+    finally:
+        depth = _CGPU_SLOT_STATE.depth - 1
+        _CGPU_SLOT_STATE.depth = depth
+        if depth == 0:
+            _CGPU_SEMAPHORE.release()
+
+
+# ============================================================================
+# cgpu Availability Checks
+# ============================================================================
+
+_CGPU_AVAIL_CACHE = {"ok": None, "checked_at": 0.0}
+_CGPU_AVAIL_TTL = 300  # seconds
+_CGPU_MISSING_CREDS_LOGGED = False
+
+
+def _maybe_log_missing_cgpu_credentials() -> None:
+    """Log a helpful warning if cgpu credentials are missing."""
+    global _CGPU_MISSING_CREDS_LOGGED
+    if _CGPU_MISSING_CREDS_LOGGED:
+        return
+
+    config_path = Path.home() / ".config" / "cgpu" / "config.json"
+    session_path = Path.home() / ".config" / "cgpu" / "state" / "session.json"
+
+    missing_paths = [path for path in (config_path, session_path) if not path.exists()]
+    if not missing_paths:
+        return
+
+    missing_list = ", ".join(str(path) for path in missing_paths)
+    logger.warning(
+        "cgpu credentials missing (%s). For Kubernetes, create the cgpu-credentials secret "
+        "(docs/cgpu-setup.md) and restart worker pods.",
+        missing_list,
+    )
+    _CGPU_MISSING_CREDS_LOGGED = True
+
+def is_cgpu_available(require_gpu: bool = True) -> bool:
+    """
+    Check if cgpu is installed and authenticated.
+    
+    Args:
+        require_gpu: If True, checks CGPU_GPU_ENABLED and GPU availability.
+                     If False, checks CGPU_ENABLED and basic cgpu connectivity.
+    
+    Returns:
+        True if cgpu is available
+    """
+    now = time.time()
+    
+    # Use cache only for the default require_gpu=True case to avoid complexity
+    if require_gpu:
+        cached = _CGPU_AVAIL_CACHE["ok"]
+        if cached is not None and (now - _CGPU_AVAIL_CACHE["checked_at"]) < _CGPU_AVAIL_TTL:
+            return cached
+
+    _refresh_from_settings()
+    logger.debug(f"DEBUG: CGPU_GPU_ENABLED={CGPU_GPU_ENABLED}, CGPU_ENABLED={CGPU_ENABLED}")
+
+    # Check flags
+    if require_gpu and not CGPU_GPU_ENABLED:
+        if require_gpu: _CGPU_AVAIL_CACHE.update({"ok": False, "checked_at": now})
+        return False
+    
+    if not require_gpu and not CGPU_ENABLED:
+        return False
+
+    _maybe_log_missing_cgpu_credentials()
+    
+    try:
+        with cgpu_slot():
+            result = subprocess.run(
+                ["cgpu", "status"],
+                capture_output=True,
+                text=True,
+                timeout=CGPU_STATUS_TIMEOUT
+            )
+        logger.debug(f"DEBUG: cgpu status returncode={result.returncode}")
+        
+        if result.returncode != 0:
+            if result.stderr:
+                logger.warning("cgpu status failed: %s", result.stderr.strip())
+            if require_gpu: _CGPU_AVAIL_CACHE.update({"ok": False, "checked_at": now})
+            return False
+
+        if require_gpu:
+            gpu_ok, _ = check_cgpu_gpu()
+            _CGPU_AVAIL_CACHE.update({"ok": gpu_ok, "checked_at": now})
+            return gpu_ok
+        
+        return True
+
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        logger.debug(f"DEBUG: cgpu status failed with {e}")
+        if require_gpu: _CGPU_AVAIL_CACHE.update({"ok": False, "checked_at": now})
+        return False
+
+
+def check_cgpu_gpu() -> Tuple[bool, str]:
+    """
+    Check if cgpu can access a GPU on Colab.
+    
+    Returns:
+        (success, gpu_info) tuple
+    """
+    try:
+        logger.info("Connecting to Cloud GPU (timeout 120s)...")
+        with cgpu_slot():
+            result = subprocess.run(
+                ["cgpu", "run", "nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader"],
+                capture_output=True,
+                text=True,
+                timeout=CGPU_GPU_CHECK_TIMEOUT
+            )
+        if result.returncode == 0 and result.stdout.strip():
+            lines = [l.strip() for l in result.stdout.strip().split('\n') if l.strip()]
+            return True, lines[0] if lines else result.stdout.strip()
+        return False, result.stderr
+    except subprocess.TimeoutExpired:
+        logger.warning("Cloud GPU connection timed out after 120s")
+        return False, "Timeout"
+    except Exception as e:
+        return False, str(e)
+
+
+def get_cgpu_metrics() -> Optional[str]:
+    """
+    Get current GPU utilization from cgpu.
+    Returns string like "cgpu: util=45% mem=1234Mi/16384Mi (12.5%)" or None if failed.
+    """
+    # Fast check first
+    _refresh_from_settings()
+    if not CGPU_GPU_ENABLED:
+        return None
+
+    try:
+        # Query utilization
+        # nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total --format=csv,noheader,nounits
+        with cgpu_slot():
+            result = subprocess.run(
+                ["cgpu", "run", "nvidia-smi", "--query-gpu=utilization.gpu,memory.used,memory.total", "--format=csv,noheader,nounits"],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+        if result.returncode != 0:
+            return None
+            
+        # Output format: "45, 1234, 16384"
+        output = result.stdout.strip()
+        if not output:
+            return None
+            
+        parts = output.split(',')
+        if len(parts) >= 3:
+            gpu_util = parts[0].strip()
+            mem_used = int(parts[1].strip())
+            mem_total = int(parts[2].strip())
+            mem_pct = (mem_used / mem_total) * 100 if mem_total > 0 else 0
+            return f"cgpu: util={gpu_util}% mem={mem_used}Mi/{mem_total}Mi ({mem_pct:.1f}%)"
+            
+    except Exception:
+        return None
+    return None
+
+
+def is_cgpu_serve_available() -> bool:
+    """
+    Check if cgpu serve (LLM endpoint) is running.
+    
+    Returns:
+        True if cgpu serve is accessible
+    """
+    if not CGPU_ENABLED:
+        return False
+    
+    try:
+        import requests
+        response = requests.get(
+            f"http://{CGPU_HOST}:{CGPU_PORT}/v1/models",
+            timeout=5
+        )
+        return response.status_code == 200
+    except Exception:
+        return False
+
+
+# ============================================================================
+# cgpu Command Execution
+# ============================================================================
+
+def run_cgpu_command(
+    cmd: str,
+    timeout: int = CGPU_TIMEOUT,
+    retries: int = 1,  # Reduced from 2 to avoid excessive retries
+    retry_delay: int = 5
+) -> Tuple[bool, str, str]:
+    """
+    Run a shell command on Colab via cgpu with retry logic.
+
+    Args:
+        cmd: Shell command to execute
+        timeout: Timeout in seconds PER ATTEMPT
+        retries: Number of retry attempts on failure (default: 1)
+        retry_delay: Seconds to wait between retries
+
+    Returns:
+        (success, stdout, stderr) tuple
+    """
+    import time
+
+    last_error = ""
+    start_time = time.time()
+
+    for attempt in range(retries + 1):
+        try:
+            logger.debug(f"Running cgpu command (attempt {attempt+1}/{retries+1}): {cmd}")
+            with cgpu_slot():
+                result = subprocess.run(
+                    ["cgpu", "run", cmd],
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout  # Timeout per attempt, not total
+                )
+            
+            duration = time.time() - start_time
+            logger.debug(f"cgpu command finished in {duration:.2f}s (exit code: {result.returncode})")
+
+            # Check for session invalidation errors
+            if "session expired" in result.stderr.lower() or "not authenticated" in result.stderr.lower():
+                logger.warning(f"   ⚠️ cgpu session expired, attempting reconnection...")
+                # Try to reconnect (cgpu status triggers re-auth)
+                subprocess.run(["cgpu", "status"], capture_output=True, timeout=30)
+                if attempt < retries:
+                    time.sleep(retry_delay)
+                    continue  # Retry
+
+            if result.returncode == 0:
+                return True, result.stdout, result.stderr
+
+            if "command finished without reporting an exit code" in result.stderr.lower():
+                if attempt < retries:
+                    logger.warning("   ⚠️ cgpu command missing exit code, retrying...")
+                    time.sleep(retry_delay)
+                    continue
+
+            return False, result.stdout, result.stderr
+
+        except subprocess.TimeoutExpired:
+            last_error = f"Timeout after {timeout}s"
+            # For timeout, don't retry - it's likely the command will timeout again
+            logger.warning(f"   ⚠️ cgpu command timed out after {timeout}s")
+            break  # Don't retry on timeout
+        except Exception as e:
+            last_error = str(e)
+            if attempt < retries:
+                logger.warning(f"   ⚠️ Error on attempt {attempt+1}/{retries+1}: {e}, retrying...")
+                time.sleep(retry_delay)
+                continue
+
+    return False, "", last_error
+
+
+def run_cgpu_python(
+    script: str,
+    timeout: int = CGPU_TIMEOUT,
+    script_name: str = "script.py"
+) -> Tuple[bool, str, str]:
+    """
+    Execute a Python script on Colab via cgpu.
+    
+    Uploads script file and runs it, avoiding shell escaping issues.
+    
+    Args:
+        script: Python script content
+        timeout: Timeout in seconds
+        script_name: Name for the remote script file
+        
+    Returns:
+        (success, stdout, stderr) tuple
+    """
+    remote_script = f"/tmp/{script_name}"
+    
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
+        f.write(script)
+        local_script = f.name
+    
+    try:
+        # Upload script
+        if not copy_to_remote(local_script, remote_script):
+            return False, "", "Failed to upload script"
+        
+        # Execute
+        return run_cgpu_command(f"python3 {remote_script}", timeout=timeout)
+        
+    finally:
+        os.unlink(local_script)
+
+
+# ============================================================================
+# File Transfer
+# ============================================================================
+
+def copy_to_remote(local_path: str, remote_path: str, timeout: int = 600) -> bool:
+    """
+    Copy file from local to Colab using cgpu copy.
+
+    Note: cgpu copy is upload-only. For downloads, use download_via_base64.
+
+    Args:
+        local_path: Path to local file
+        remote_path: Destination path on Colab
+        timeout: Upload timeout in seconds (default: 600 = 10 min)
+
+    Returns:
+        True if successful
+    """
+    try:
+        # Get file size for logging
+        size_mb = file_size_mb(local_path)
+        remote_dir = os.path.dirname(remote_path)
+        if remote_dir:
+            # Increased timeout for mkdir as cgpu connection setup can take time
+            ok, _, stderr = run_cgpu_command(f"mkdir -p {remote_dir}", timeout=120)
+            if not ok:
+                logger.error(f"   ❌ Failed to create remote directory: {stderr}")
+                return False
+
+        with cgpu_slot():
+            result = subprocess.run(
+                ["cgpu", "copy", local_path, remote_path],
+                capture_output=True,
+                text=True,
+                timeout=timeout
+            )
+
+        if result.returncode != 0:
+            logger.error(f"   ❌ cgpu copy failed (file: {os.path.basename(local_path)}, size: {size_mb:.1f}MB)")
+            if result.stderr:
+                # Show first line of error
+                error_line = result.stderr.strip().split('\n')[0]
+                logger.error(f"      Error: {error_line}")
+            return False
+
+        return True
+
+    except subprocess.TimeoutExpired:
+        logger.error(f"   ❌ Upload timeout after {timeout}s (file: {os.path.basename(local_path)})")
+        logger.error(f"      → File may be too large ({size_mb:.1f}MB), consider increasing timeout")
+        return False
+    except Exception as e:
+        logger.error(f"   ❌ Copy to remote failed: {e}")
+        return False
+
+
+def _get_remote_file_size(remote_path: str) -> Optional[int]:
+    """Best-effort remote size lookup for progress logging."""
+    success, stdout, _ = run_cgpu_command(f"stat -c %s {remote_path}", timeout=30)
+    if not success:
+        return None
+    try:
+        return int(stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return None
+
+
+def download_via_base64(
+    remote_path: str,
+    local_path: str,
+    timeout: int = 300
+) -> bool:
+    """
+    Download file from Colab via base64 encoding (streamed).
+
+    Since cgpu copy is upload-only, we use base64 over stdout.
+    This implementation streams line-by-line to avoid large memory spikes.
+    """
+    import time
+    import binascii
+
+    start_time = time.time()
+    remote_size = _get_remote_file_size(remote_path)
+    last_report = 0
+    report_every = 50 * 1024 * 1024  # 50MB
+
+    # Ensure output directory exists
+    os.makedirs(os.path.dirname(local_path) or '.', exist_ok=True)
+
+    try:
+        bytes_written = 0
+        with cgpu_slot():
+            proc = subprocess.Popen(
+                ["cgpu", "run", f"base64 {remote_path}"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+            )
+
+            with open(local_path, "wb") as out_file:
+                assert proc.stdout is not None
+                for line in proc.stdout:
+                    if time.time() - start_time > timeout:
+                        proc.kill()
+                        logger.error("   ❌ Download timed out after %ss", timeout)
+                        return False
+
+                    line = line.strip()
+                    if not line or line.startswith("Authenticated"):
+                        continue
+
+                    try:
+                        chunk = base64.b64decode(line)
+                    except binascii.Error:
+                        # Skip malformed lines (should be rare)
+                        continue
+
+                    out_file.write(chunk)
+                    bytes_written += len(chunk)
+
+                    if remote_size and (bytes_written - last_report) >= report_every:
+                        pct = (bytes_written / remote_size) * 100
+                        logger.info("   ⬇️  Downloaded %.1f%% (%.1f MB)", pct, bytes_written / (1024 * 1024))
+                        last_report = bytes_written
+
+            proc.wait(timeout=max(1, int(timeout - (time.time() - start_time))))
+            stderr = proc.stderr.read().strip() if proc.stderr else ""
+
+        if proc.returncode != 0:
+            logger.error("   ❌ Download failed: %s", stderr)
+            return False
+
+        if remote_size and bytes_written < remote_size:
+            logger.error("   ❌ Download incomplete: %d/%d bytes", bytes_written, remote_size)
+            return False
+
+        return True
+
+    except subprocess.TimeoutExpired:
+        logger.error("   ❌ Download timed out after %ss", timeout)
+        return False
+    except Exception as e:
+        logger.error(f"   ❌ Failed to decode/save: {e}")
+        return False
+
+
+def parse_base64_output(output: str, start_marker: str, end_marker: str) -> Optional[bytes]:
+    """
+    Extract base64 data from cgpu output using markers.
+    
+    Args:
+        output: Full cgpu stdout
+        start_marker: Marker indicating start of base64 data
+        end_marker: Marker indicating end of base64 data
+        
+    Returns:
+        Decoded bytes or None if not found
+    """
+    if start_marker not in output or end_marker not in output:
+        return None
+    
+    start_idx = output.index(start_marker) + len(start_marker)
+    end_idx = output.index(end_marker)
+    
+    b64_data = output[start_idx:end_idx].strip()
+    return base64.b64decode(b64_data)
+
+
+# ============================================================================
+# Environment Setup Helpers
+# ============================================================================
+
+def setup_python_packages(packages: list, quiet: bool = True) -> bool:
+    """
+    Install Python packages on Colab.
+    
+    Args:
+        packages: List of package names
+        quiet: Suppress pip output
+        
+    Returns:
+        True if successful
+    """
+    quiet_flag = "-q" if quiet else ""
+    packages_str = " ".join(packages)
+    
+    success, stdout, stderr = run_cgpu_command(
+        f"pip install {quiet_flag} {packages_str}",
+        timeout=300
+    )
+    
+    return success
+
+
+def check_cuda_available() -> Tuple[bool, str]:
+    """
+    Check if CUDA is available on Colab.
+    
+    Returns:
+        (available, info) tuple
+    """
+    script = '''
+import torch
+if torch.cuda.is_available():
+    print(f"CUDA_OK: {torch.cuda.get_device_name(0)}, {torch.cuda.get_device_properties(0).total_memory // 1024**3}GB")
+else:
+    print("CUDA_FAIL: No GPU")
+'''
+    
+    success, stdout, stderr = run_cgpu_python(script, timeout=60)
+    
+    if success and "CUDA_OK" in stdout:
+        info = stdout.split("CUDA_OK:")[1].strip().split('\n')[0]
+        return True, info
+    
+    return False, stderr or "CUDA not available"
+
+
+# ============================================================================
+# Cleanup Helpers
+# ============================================================================
+
+def cleanup_remote(paths: list) -> None:
+    """
+    Clean up files/directories on Colab (best effort).
+    
+    Args:
+        paths: List of paths to remove
+    """
+    for path in paths:
+        try:
+            run_cgpu_command(f"rm -rf {path}", timeout=30)
+        except Exception:
+            pass
+
+
+# ============================================================================
+# Aliases for backward compatibility
+# ============================================================================
+
+# cgpu_upscaler.py uses these names
+cgpu_copy_to_remote = copy_to_remote
+cgpu_download_base64 = download_via_base64
+
+
+# ============================================================================
+# Module Self-Test
+# ============================================================================
+
+if __name__ == "__main__":
+    print("cgpu Utilities - Status Check")
+    print("=" * 50)
+    
+    print(f"\nConfiguration:")
+    print(f"  CGPU_GPU_ENABLED: {CGPU_GPU_ENABLED}")
+    print(f"  CGPU_ENABLED (LLM): {CGPU_ENABLED}")
+    print(f"  CGPU_HOST: {CGPU_HOST}")
+    print(f"  CGPU_PORT: {CGPU_PORT}")
+    print(f"  CGPU_MODEL: {CGPU_MODEL}")
+    print(f"  CGPU_TIMEOUT: {CGPU_TIMEOUT}s")
+    print(f"  CGPU_MAX_CONCURRENCY: {CGPU_MAX_CONCURRENCY}")
+    
+    print(f"\nAvailability:")
+    
+    gpu_available = is_cgpu_available()
+    print(f"  cgpu (GPU): {'✅' if gpu_available else '❌'}")
+    
+    if gpu_available:
+        success, info = check_cgpu_gpu()
+        print(f"  GPU Info: {info if success else '❌ ' + info}")
+        
+        cuda_ok, cuda_info = check_cuda_available()
+        print(f"  CUDA: {'✅ ' + cuda_info if cuda_ok else '❌ ' + cuda_info}")
+    
+    serve_available = is_cgpu_serve_available()
+    print(f"  cgpu serve (LLM): {'✅' if serve_available else '❌'}")

@@ -1,0 +1,170 @@
+"""
+Helpers for parsing and normalizing Web UI job options.
+"""
+
+from __future__ import annotations
+
+import copy
+from typing import Any, Dict
+
+from ..config import Settings
+
+
+def _parse_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return bool(value)
+
+
+def apply_preview_preset(data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Apply fast preview overrides for /api/jobs preset=fast OR quality=preview.
+    """
+    is_preview = data.get("preset") == "fast" or data.get("quality") == "preview"
+
+    if not is_preview:
+        return data
+
+    updated = copy.deepcopy(data)
+    updated["style"] = "dynamic"
+    updated["target_duration"] = min( updated.get("target_duration", 30) or 30, 30)
+    updated["upscale"] = False
+    updated["stabilize"] = False
+    updated["enhance"] = False
+    updated["cgpu"] = False
+    updated["creative_loop"] = False
+    
+    # Ensure quality_profile is set for downstream components
+    updated["quality_profile"] = "preview"
+
+    options = updated.setdefault("options", {})
+    is_shorts = _parse_bool(options.get("shorts_mode", updated.get("shorts_mode", False)))
+    if is_shorts:
+        options["export_width"] = 360
+        options["export_height"] = 640
+    else:
+        options["export_width"] = 640
+        options["export_height"] = 360
+
+    return updated
+
+
+def apply_finalize_overrides(options: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Upgrade a preview job to a high-quality render.
+    """
+    updated = copy.deepcopy(options)
+    updated["quality_profile"] = "high"
+    updated["preview"] = False
+    updated["export_width"] = 1920
+    updated["export_height"] = 1080
+    updated["upscale"] = True
+    updated["stabilize"] = True
+    updated["enhance"] = True
+    return updated
+
+
+def normalize_options(data: Dict[str, Any], defaults: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
+    """
+    Normalize and validate job options from API request.
+
+    Supports both nested "options" and flat request payloads.
+    Automatically derives music_end from target_duration when missing.
+    """
+    opts = data.get("options", {})
+
+    target_duration = float(opts.get("target_duration", data.get("target_duration", 0)) or 0)
+    
+    # Handle music start (supports both API 'music_start' and HTML 'music_start_time')
+    music_start_val = opts.get("music_start", data.get("music_start"))
+    if music_start_val is None:
+        music_start_val = opts.get("music_start_time", data.get("music_start_time", 0))
+    music_start = float(music_start_val or 0)
+
+    music_end_raw = opts.get("music_end", data.get("music_end", None))
+
+    music_end = float(music_end_raw) if music_end_raw is not None else None
+    if target_duration > 0 and music_end is None:
+        music_end = music_start + target_duration
+
+    target_duration = max(0, min(target_duration, 3600))
+    music_start = max(0, music_start)
+    if music_end is not None:
+        music_end = max(music_start + 1, music_end)
+        
+    # Handle Music Track Selection
+    music_track = str(opts.get("music_track", data.get("music_track", "")))
+    if music_track.lower() == "auto":
+        music_track = ""  # Let AI Auto-Select
+
+    # Optional: user-selected input files
+    raw_video_files = opts.get("video_files", data.get("video_files"))
+    video_files = []
+    if raw_video_files:
+        if isinstance(raw_video_files, str):
+            video_files = [v.strip() for v in raw_video_files.split(",") if v.strip()]
+        elif isinstance(raw_video_files, list):
+            video_files = [str(v).strip() for v in raw_video_files if str(v).strip()]
+
+    def get_bool(key: str) -> bool:
+        val = opts.get(key, data.get(key))
+        if val is None:
+            return bool(defaults.get(key, False))
+        return _parse_bool(val)
+
+    quality_profile = str(opts.get("quality_profile", data.get("quality_profile", "standard"))).lower()
+
+    cloud_acceleration = get_bool("cloud_acceleration") or get_bool("cgpu") or settings.llm.cgpu_enabled
+
+    return {
+        "prompt": str(opts.get("prompt", data.get("prompt", ""))),
+        "stabilize": get_bool("stabilize"),
+        "upscale": get_bool("upscale"),
+        "enhance": get_bool("enhance"),
+        "stabilize_ai": get_bool("stabilize_ai"),
+        "stabilize_mode": str(opts.get("stabilize_mode", data.get("stabilize_mode", "professional"))).lower(),
+        "aggressive_smoothing": get_bool("aggressive_smoothing"),
+        "fast_stabilization": get_bool("fast_stabilization"),
+        "skip_color_correction": get_bool("skip_color_correction"),
+        "llm_clip_selection": get_bool("llm_clip_selection"),
+        "shorts_mode": get_bool("shorts_mode"),
+        "export_width": int(opts.get("export_width", data.get("export_width", 0)) or 0),
+        "export_height": int(opts.get("export_height", data.get("export_height", 0)) or 0),
+        "creative_loop": get_bool("creative_loop"),
+        "story_engine": get_bool("story_engine"),
+        "captions": get_bool("captions"),
+        "export_timeline": get_bool("export_timeline"),
+        "generate_proxies": get_bool("generate_proxies"),
+        "preserve_aspect": get_bool("preserve_aspect"),
+        "target_duration": target_duration,
+        "music_start": music_start,
+        "music_end": music_end,
+        "music_track": music_track,
+        "video_files": video_files,
+        "preview": data.get("preset") == "fast" or quality_profile == "preview",
+        "quality_profile": quality_profile,
+        "cloud_acceleration": cloud_acceleration,
+        "cgpu": cloud_acceleration,
+        "clean_audio": get_bool("clean_audio"),
+        "noise_reduction": get_bool("noise_reduction"),
+        "voice_isolation": get_bool("voice_isolation"),
+        "story_arc": str(opts.get("story_arc", data.get("story_arc", ""))),
+        "reframe_mode": str(opts.get("reframe_mode", data.get("reframe_mode", "auto"))),
+        "caption_style": str(opts.get("caption_style", data.get("caption_style", "tiktok"))),
+        # Color Grading
+        "color_grading": str(opts.get("color_grading", data.get("color_grading", "auto"))),
+        "color_intensity": float(opts.get("color_intensity", data.get("color_intensity", 100)) or 100) / 100.0,
+        # Video Enhancement
+        "denoise": get_bool("denoise"),
+        "sharpen": get_bool("sharpen"),
+        # Audio Enhancement
+        "dialogue_duck": get_bool("dialogue_duck"),
+        "audio_normalize": get_bool("audio_normalize"),
+        # Film Emulation
+        "film_grain": str(opts.get("film_grain", data.get("film_grain", "none"))),
+        # Output Format
+        "auto_reframe": get_bool("auto_reframe"),
+        "export_recipe": get_bool("export_recipe"),
+    }

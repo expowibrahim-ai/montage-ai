@@ -1,0 +1,19 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: montage-ai-worker-scaledobject
+  namespace: montage-ai
+  labels:
+    app.kubernetes.io/name: montage-ai
+    app.kubernetes.io/component: worker
+spec:
+  scaleTargetRef:
+    name: montage-ai-worker
+  minReplicaCount: 3
+  maxReplicaCount: 24
+  triggers:
+    - type: redis
+      metadata:
+        address: redis.montage-ai.svc.cluster.local:6379
+        listName: "rq:queue:default:intermediate"
+        listLength: "4"

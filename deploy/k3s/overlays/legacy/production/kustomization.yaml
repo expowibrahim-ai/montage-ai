@@ -1,0 +1,154 @@
+# Production overlay for montage-ai
+# High-quality settings with full GPU support and maximum resources
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../../base
+  - ../../app/worker-deployment.yaml
+
+namespace: montage-ai
+
+# Production deployment configuration
+patches:
+  # High-quality production settings
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: montage-ai-web
+        namespace: montage-ai
+      spec:
+        template:
+          spec:
+            tolerations:
+              - key: "nvidia.com/gpu"
+                operator: "Exists"
+                effect: "NoSchedule"
+              - key: "amd.com/gpu"
+                operator: "Exists"
+                effect: "NoSchedule"
+              - key: "gpu"
+                operator: "Equal"
+                value: "amd-rocm"
+                effect: "NoSchedule"
+            affinity:
+              nodeAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                  nodeSelectorTerms:
+                    - matchExpressions:
+                        - key: fluxibri.ai/gpu-enabled
+                          operator: In
+                          values: ["true"]
+              podAntiAffinity:
+                preferredDuringSchedulingIgnoredDuringExecution:
+                  - weight: 100
+                    podAffinityTerm:
+                      labelSelector:
+                        matchLabels:
+                          app.kubernetes.io/name: montage-ai
+                          app.kubernetes.io/component: web-ui
+                      topologyKey: kubernetes.io/hostname
+            containers:
+              - name: montage-ai
+                resources:
+                  requests:
+                    cpu: "1"
+                    memory: "4Gi"
+                  limits:
+                    cpu: "4"
+                    memory: "8Gi"
+                env:
+                  - name: FFMPEG_HWACCEL
+                    value: "vaapi"
+                  - name: LIBVA_DRIVER_NAME
+                    value: "radeonsi"
+    target:
+      kind: Deployment
+      name: montage-ai-web
+  
+  # Ensure worker also uses GPU
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: montage-ai-worker
+      spec:
+        template:
+          spec:
+            tolerations:
+              - key: "nvidia.com/gpu"
+                operator: "Exists"
+                effect: "NoSchedule"
+              - key: "amd.com/gpu"
+                operator: "Exists"
+                effect: "NoSchedule"
+              - key: "gpu"
+                operator: "Equal"
+                value: "amd-rocm"
+                effect: "NoSchedule"
+            affinity:
+              nodeAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                  nodeSelectorTerms:
+                    - matchExpressions:
+                        - key: fluxibri.ai/gpu-enabled
+                          operator: In
+                          values: ["true"]
+              podAntiAffinity:
+                preferredDuringSchedulingIgnoredDuringExecution:
+                  - weight: 100
+                    podAffinityTerm:
+                      labelSelector:
+                        matchLabels:
+                          app: montage-ai
+                          component: worker
+                      topologyKey: kubernetes.io/hostname
+            containers:
+              - name: worker
+                resources:
+                  requests:
+                    cpu: "4"
+                    memory: "16Gi"
+                    amd.com/gpu: "1"
+                  limits:
+                    cpu: "8"
+                    memory: "32Gi"
+                    amd.com/gpu: "1"
+                env:
+                  - name: FFMPEG_HWACCEL
+                    value: "vaapi"
+                  - name: LIBVA_DRIVER_NAME
+                    value: "radeonsi"
+    target:
+      kind: Deployment
+      name: montage-ai-worker
+
+# Production config settings
+configMapGenerator:
+  - name: montage-ai-config
+    behavior: merge
+    literals:
+      - CUT_STYLE=dynamic
+      - STABILIZE=true
+      - UPSCALE=true
+      - ENHANCE=true
+      - FFMPEG_PRESET=slow
+      - VERBOSE=true
+
+replacements:
+  - source:
+      kind: ConfigMap
+      name: cluster-config
+      fieldPath: data.IMAGE_FULL
+    targets:
+      - select:
+          kind: Deployment
+          name: montage-ai-worker
+        fieldPaths:
+          - spec.template.spec.containers.[name=worker].image
+      - select:
+          kind: Deployment
+          name: montage-ai-worker-heavy
+        fieldPaths:
+          - spec.template.spec.containers.[name=worker].image

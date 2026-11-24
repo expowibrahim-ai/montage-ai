@@ -1,0 +1,152 @@
+# Distributed Rendering Overlay
+#
+# Uses NFS storage for multi-node GPU access.
+# Jobs can run on ANY GPU node (AMD, Jetson, or both).
+#
+# Usage:
+#   kubectl apply -k deploy/k3s/overlays/distributed/
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: montage-ai
+
+  # NFS PVCs are expected to exist in the cluster already
+resources:
+- ../../../base
+- ../../distributed/worker-daemonset.yaml
+
+  # Use JSON 6902 patch to REPLACE volumes (not add)
+
+patches:
+- patch: |-
+    - op: replace
+      path: /spec/template/spec/affinity
+      value:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/arch
+                    operator: In
+                    values:
+                      - amd64
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: montage-ai
+                    app.kubernetes.io/component: renderer
+                topologyKey: kubernetes.io/hostname
+    - op: replace
+      path: /spec/template/spec/volumes
+      value:
+        - name: input
+          persistentVolumeClaim:
+            claimName: montage-ai-input-nfs
+        - name: music
+          persistentVolumeClaim:
+            claimName: montage-ai-music-nfs
+        - name: assets
+          persistentVolumeClaim:
+            claimName: montage-ai-assets-nfs
+        - name: output
+          persistentVolumeClaim:
+            claimName: montage-ai-output-nfs
+        - name: cgpu-config
+          emptyDir: {}
+        - name: cgpu-secrets
+          secret:
+            secretName: cgpu-credentials
+            optional: true
+            items:
+              - key: config.json
+                path: config.json
+              - key: session.json
+                path: session.json
+        - name: dev-dri
+          hostPath:
+            path: /dev/dri
+            type: DirectoryOrCreate
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Gi
+        - name: script
+          configMap:
+            name: montage-ai-script
+            defaultMode: 0755
+        - name: patch-segment-writer
+          configMap:
+            name: montage-ai-patch-segment-writer
+        - name: patch-clip-processor
+          configMap:
+            name: montage-ai-patch-clip-processor
+        - name: patch-analysis-engine
+          configMap:
+            name: montage-ai-patch-analysis-engine
+        - name: patch-hardware
+          configMap:
+            name: montage-ai-patch-hardware
+        - name: patch-creative-director
+          configMap:
+            name: montage-ai-patch-creative-director
+        - name: patch-proxy-generator
+          configMap:
+            name: montage-ai-patch-proxy-generator
+    - op: replace
+      path: /spec/template/spec/containers/0/imagePullPolicy
+      value: Always
+    - op: replace
+      path: /spec/template/spec/initContainers/0/imagePullPolicy
+      value: Always
+  target:
+    kind: Job
+    name: montage-ai-render
+- patch: |-
+    - op: replace
+      path: /spec/template/spec/volumes
+      value:
+        - name: data-input
+          persistentVolumeClaim:
+            claimName: montage-ai-input-nfs
+        - name: data-music
+          persistentVolumeClaim:
+            claimName: montage-ai-music-nfs
+        - name: data-assets
+          persistentVolumeClaim:
+            claimName: montage-ai-assets-nfs
+        - name: data-output
+          persistentVolumeClaim:
+            claimName: montage-ai-output-nfs
+        - name: dev-dri
+          hostPath:
+            path: /dev/dri
+            type: DirectoryOrCreate
+  target:
+    kind: Deployment
+    name: montage-ai-web
+
+replacements:
+  - source:
+      kind: ConfigMap
+      name: cluster-config
+      fieldPath: data.IMAGE_FULL
+    targets:
+      - select:
+          kind: DaemonSet
+          name: montage-ai-worker
+        fieldPaths:
+          - spec.template.spec.containers.[name=worker].image
+      - select:
+          kind: Deployment
+          name: montage-ai-worker-gpu-amd
+        fieldPaths:
+          - spec.template.spec.containers.[name=worker].image
+      - select:
+          kind: Deployment
+          name: montage-ai-worker-gpu-nvidia
+        fieldPaths:
+          - spec.template.spec.containers.[name=worker].image

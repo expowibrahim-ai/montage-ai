@@ -1,0 +1,2 @@
+# Deprecated: split patches into per-resource files. See web-patch.yaml, worker-patch.yaml, worker-heavy-patch.yaml, redis-patch.yaml
+# This file is left in place for legacy reference and may be removed later.

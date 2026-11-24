@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: montage-ai-registry
+  namespace: montage-ai
+  labels:
+    app: montage-ai-registry
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: montage-ai-registry
+  template:
+    metadata:
+      labels:
+        app: montage-ai-registry
+    spec:
+      # Pin to node labeled for registry hosting
+      nodeSelector:
+        fluxibri.ai/registry-host: "true"
+      hostNetwork: false
+      dnsPolicy: ClusterFirst
+      containers:
+        - name: registry
+          image: registry:2
+          imagePullPolicy: IfNotPresent
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          ports:
+            - containerPort: 5000
+              protocol: TCP
+          volumeMounts:
+            - name: registry-data
+              mountPath: /var/lib/registry
+      volumes:
+        - name: registry-data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: montage-ai-registry
+  namespace: montage-ai
+spec:
+  type: ClusterIP
+  selector:
+    app: montage-ai-registry
+  ports:
+    - name: registry
+      port: 5000
+      targetPort: 5000

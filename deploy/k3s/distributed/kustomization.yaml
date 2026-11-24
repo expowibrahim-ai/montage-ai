@@ -1,0 +1,67 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: montage-ai
+
+resources:
+  - scene-detection-job.yaml
+  - worker-daemonset.yaml
+
+# Common labels for distributed components
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: montage-ai
+      montage-ai.fluxibri.dev/mode: distributed
+    includeSelectors: false
+
+configMapGenerator:
+  - name: cluster-config
+    behavior: create
+    envs:
+      - ../base/cluster-config.env
+
+replacements:
+  - source:
+      kind: ConfigMap
+      name: cluster-config
+      fieldPath: data.IMAGE_FULL
+    targets:
+      - select:
+          kind: Job
+          name: scene-detect
+        fieldPaths:
+          - spec.template.spec.containers.[name=scene-detect].image
+      - select:
+          kind: Job
+          name: gpu-encode
+        fieldPaths:
+          - spec.template.spec.containers.[name=encoder].image
+      - select:
+          kind: DaemonSet
+          name: montage-ai-worker
+        fieldPaths:
+          - spec.template.spec.containers.[name=worker].image
+      - select:
+          kind: Deployment
+          name: montage-ai-worker-gpu-amd
+        fieldPaths:
+          - spec.template.spec.containers.[name=worker].image
+      - select:
+          kind: Deployment
+          name: montage-ai-worker-gpu-nvidia
+        fieldPaths:
+          - spec.template.spec.containers.[name=worker].image
+
+# Patches for environment-specific configs
+patches:
+  # Increase resources for 4K processing
+  - target:
+      kind: Job
+      name: scene-detect
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/memory
+        value: "8Gi"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/memory
+        value: "16Gi"

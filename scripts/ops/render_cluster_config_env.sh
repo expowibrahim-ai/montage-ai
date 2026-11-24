@@ -1,0 +1,206 @@
+#!/usr/bin/env bash
+# Render deploy/k3s/base/cluster-config.env from deploy/k3s/config-global.yaml
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+LIB_CONFIG_GLOBAL="$REPO_ROOT/scripts/ops/lib/config_global.sh"
+CONFIG_GLOBAL_PATH="${CONFIG_GLOBAL:-$REPO_ROOT/deploy/k3s/config-global.yaml}"
+ENV_OUT="${ENV_OUT:-$REPO_ROOT/deploy/k3s/base/cluster-config.env}"
+DEPLOY_CONFIG_ENV="${DEPLOY_CONFIG_ENV:-$REPO_ROOT/deploy/config.env}"
+
+if [ -f "$LIB_CONFIG_GLOBAL" ]; then
+  # shellcheck disable=SC1090
+  source "$LIB_CONFIG_GLOBAL"
+fi
+
+if [ -f "$DEPLOY_CONFIG_ENV" ]; then
+  # shellcheck disable=SC1090
+  source "$DEPLOY_CONFIG_ENV"
+fi
+
+if [ ! -f "$CONFIG_GLOBAL_PATH" ]; then
+  echo "❌ ERROR: Missing ${CONFIG_GLOBAL_PATH}"
+  echo "Copy the template first:"
+  echo "  cp deploy/k3s/config-global.yaml.example deploy/k3s/config-global.yaml"
+  exit 1
+fi
+
+if command -v config_global_export >/dev/null 2>&1; then
+  eval "$(config_global_export "$CONFIG_GLOBAL_PATH")"
+fi
+
+: "${REGISTRY_URL:=}"
+: "${IMAGE_NAME:=montage-ai}"
+: "${IMAGE_TAG:=latest}"
+: "${IMAGE_FULL:=${REGISTRY_URL:+$REGISTRY_URL/}${IMAGE_NAME}:${IMAGE_TAG}}"
+: "${CLUSTER_NAMESPACE:=montage-ai}"
+: "${MONTAGE_HOSTNAME:=${APP_DOMAIN:-montage-ai.local}}"
+: "${STORAGE_CLASS_DEFAULT:=local-path}"
+: "${STORAGE_CLASS_NFS:=nfs-client}"
+: "${NFS_SERVER:=}"
+: "${NFS_PATH:=}"
+: "${PVC_INPUT_NAME:=}"
+: "${PVC_OUTPUT_NAME:=}"
+: "${PVC_MUSIC_NAME:=}"
+: "${PVC_ASSETS_NAME:=}"
+: "${REDIS_HOST:=redis.${CLUSTER_NAMESPACE}.svc.cluster.local}"
+: "${REDIS_PORT:=6379}"
+: "${OPENAI_API_BASE:=}"
+: "${OPENAI_API_KEY:=}"
+: "${OPENAI_MODEL:=auto}"
+: "${OPENAI_VISION_MODEL:=}"
+: "${OLLAMA_HOST:=}"
+: "${CGPU_ENABLED:=false}"
+: "${CGPU_GPU_ENABLED:=}"
+: "${CGPU_HOST:=}"
+: "${CGPU_PORT:=8080}"
+: "${CGPU_MODEL:=gemini-2.0-flash}"
+: "${CGPU_TIMEOUT:=1200}"
+: "${CGPU_MAX_CONCURRENCY:=1}"
+: "${CGPU_STATUS_TIMEOUT:=30}"
+: "${CGPU_GPU_CHECK_TIMEOUT:=120}"
+: "${CGPU_OUTPUT_DIR:=}"
+: "${CGPU_REPLICAS:=}"
+: "${FORCE_CGPU_ENCODING:=}"
+: "${FINAL_ENCODE_BACKEND:=}"
+: "${FFMPEG_MCP_ENDPOINT:=}"
+: "${FFMPEG_MCP_HOST:=}"
+: "${FFMPEG_MCP_PORT:=8080}"
+: "${WORKER_MIN_REPLICAS:=3}"
+: "${WORKER_MAX_REPLICAS:=24}"
+: "${WORKER_CPU_REQUEST:=1000m}"
+: "${WORKER_CPU_LIMIT:=16}"
+: "${WORKER_MEMORY_REQUEST:=2Gi}"
+: "${WORKER_MEMORY_LIMIT:=24Gi}"
+: "${CLUSTER_PARALLELISM:=24}"
+: "${CLUSTER_RENDER_TIER:=xlarge}"
+: "${SCENE_DETECT_TIER:=xlarge}"
+: "${MAX_SCENE_WORKERS:=24}"
+: "${MAX_PARALLEL_JOBS:=24}"
+: "${FFMPEG_THREADS:=${WORKER_CPU_LIMIT}}"
+
+# KEDA thresholds (list lengths used by ScaledObjects)
+: "${WORKER_QUEUE_SCALE_THRESHOLD:=4}"
+: "${WORKER_QUEUE_LIST_NAME:=rq:queue:default:intermediate}"
+: "${REGISTRY_NAMESPACE:=}"
+: "${CLUSTER_DOMAIN:=}"
+: "${CLUSTER_ALLOW_MIXED_ARCH:=}"
+: "${CLUSTER_ARCH_SELECTOR_KEY:=}"
+: "${CLUSTER_NODE_SELECTOR:=}"
+
+# if [ -z "${REGISTRY_URL:-}" ]; then
+#   if [ -n "${REGISTRY_HOST:-}" ]; then
+#     REGISTRY_URL="${REGISTRY_HOST}${REGISTRY_PORT:+:${REGISTRY_PORT}}"
+#   elif [ -n "${REGISTRY_NAMESPACE}" ] || [ -n "${K3S_CLUSTER_DOMAIN}" ] || [ -n "${CLUSTER_DOMAIN}" ]; then
+#     registry_ns="${REGISTRY_NAMESPACE:-registry}"
+#     cluster_domain="${K3S_CLUSTER_DOMAIN:-${CLUSTER_DOMAIN:-cluster.local}}"
+#     REGISTRY_URL="registry.${registry_ns}.svc.${cluster_domain}:5000"
+#   fi
+# fi
+
+# NOTE: OLLAMA_HOST is intentionally NOT auto-populated from cluster DNS.
+# Set it explicitly in config-global.yaml if you deploy an Ollama service.
+# Auto-populating caused DNS resolution errors in minimal deployments.
+
+if [ -z "${CGPU_HOST:-}" ] && [ -n "${CLUSTER_NAMESPACE:-}" ]; then
+  cluster_domain="${K3S_CLUSTER_DOMAIN:-${CLUSTER_DOMAIN:-cluster.local}}"
+  CGPU_HOST="cgpu-server.${CLUSTER_NAMESPACE}.svc.${cluster_domain}"
+fi
+
+if [ -z "${FFMPEG_MCP_ENDPOINT:-}" ] && [ -n "${CLUSTER_NAMESPACE:-}" ]; then
+  cluster_domain="${K3S_CLUSTER_DOMAIN:-${CLUSTER_DOMAIN:-cluster.local}}"
+  FFMPEG_MCP_ENDPOINT="http://ffmpeg-mcp.${CLUSTER_NAMESPACE}.svc.${cluster_domain}:${FFMPEG_MCP_PORT}"
+fi
+
+# Optional cgpu deployment scale: default to 0 unless explicitly enabled.
+if [ -z "${CGPU_REPLICAS:-}" ]; then
+  case "$(echo "${CGPU_ENABLED:-false}" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on)
+      CGPU_REPLICAS="1"
+      ;;
+    *)
+      CGPU_REPLICAS="0"
+      ;;
+  esac
+fi
+
+if [ -z "${CLUSTER_ALLOW_MIXED_ARCH:-}" ]; then
+  CLUSTER_ALLOW_MIXED_ARCH="true"
+fi
+if [ -z "${CLUSTER_ARCH_SELECTOR_KEY:-}" ]; then
+  CLUSTER_ARCH_SELECTOR_KEY="kubernetes.io/arch"
+fi
+
+# Validate: reject unresolved angle-bracket placeholders in critical fields
+_validation_failed=0
+for _var_name in MONTAGE_HOSTNAME CLUSTER_NAMESPACE; do
+  eval "_val=\${${_var_name}:-}"
+  if echo "$_val" | grep -qE '<[A-Z_]+>'; then
+    echo "❌ ERROR: ${_var_name}=\"${_val}\" contains an unresolved placeholder."
+    echo "   Update deploy/k3s/config-global.yaml and replace all <...> values."
+    _validation_failed=1
+  fi
+done
+if [ "$_validation_failed" -eq 1 ]; then
+  exit 1
+fi
+
+cat > "$ENV_OUT" <<EOF_ENV
+REGISTRY_URL=${REGISTRY_URL}
+IMAGE_NAME=${IMAGE_NAME}
+IMAGE_TAG=${IMAGE_TAG}
+IMAGE_FULL=${IMAGE_FULL}
+CLUSTER_NAMESPACE=${CLUSTER_NAMESPACE}
+MONTAGE_HOSTNAME=${MONTAGE_HOSTNAME}
+STORAGE_CLASS_DEFAULT=${STORAGE_CLASS_DEFAULT}
+STORAGE_CLASS_NFS=${STORAGE_CLASS_NFS}
+NFS_SERVER=${NFS_SERVER}
+NFS_PATH=${NFS_PATH}
+PVC_INPUT_NAME=${PVC_INPUT_NAME}
+PVC_OUTPUT_NAME=${PVC_OUTPUT_NAME}
+PVC_MUSIC_NAME=${PVC_MUSIC_NAME}
+PVC_ASSETS_NAME=${PVC_ASSETS_NAME}
+WORKER_QUEUE_SCALE_THRESHOLD=${WORKER_QUEUE_SCALE_THRESHOLD}
+WORKER_QUEUE_LIST_NAME=${WORKER_QUEUE_LIST_NAME}
+WORKER_MIN_REPLICAS=${WORKER_MIN_REPLICAS}
+WORKER_MAX_REPLICAS=${WORKER_MAX_REPLICAS}
+WORKER_CPU_REQUEST=${WORKER_CPU_REQUEST}
+WORKER_CPU_LIMIT=${WORKER_CPU_LIMIT}
+WORKER_MEMORY_REQUEST=${WORKER_MEMORY_REQUEST}
+WORKER_MEMORY_LIMIT=${WORKER_MEMORY_LIMIT}
+CLUSTER_PARALLELISM=${CLUSTER_PARALLELISM}
+CLUSTER_RENDER_TIER=${CLUSTER_RENDER_TIER}
+SCENE_DETECT_TIER=${SCENE_DETECT_TIER}
+MAX_SCENE_WORKERS=${MAX_SCENE_WORKERS}
+MAX_PARALLEL_JOBS=${MAX_PARALLEL_JOBS}
+FFMPEG_THREADS=${FFMPEG_THREADS}
+REDIS_HOST=${REDIS_HOST}
+REDIS_PORT=${REDIS_PORT}
+OPENAI_API_BASE=${OPENAI_API_BASE}
+OPENAI_API_KEY=${OPENAI_API_KEY}
+OPENAI_MODEL=${OPENAI_MODEL}
+OPENAI_VISION_MODEL=${OPENAI_VISION_MODEL}
+OLLAMA_HOST=${OLLAMA_HOST}
+CGPU_ENABLED=${CGPU_ENABLED}
+CGPU_GPU_ENABLED=${CGPU_GPU_ENABLED}
+CGPU_HOST=${CGPU_HOST}
+CGPU_PORT=${CGPU_PORT}
+CGPU_MODEL=${CGPU_MODEL}
+CGPU_TIMEOUT=${CGPU_TIMEOUT}
+CGPU_MAX_CONCURRENCY=${CGPU_MAX_CONCURRENCY}
+CGPU_STATUS_TIMEOUT=${CGPU_STATUS_TIMEOUT}
+CGPU_GPU_CHECK_TIMEOUT=${CGPU_GPU_CHECK_TIMEOUT}
+CGPU_OUTPUT_DIR=${CGPU_OUTPUT_DIR}
+CGPU_REPLICAS=${CGPU_REPLICAS}
+FORCE_CGPU_ENCODING=${FORCE_CGPU_ENCODING}
+FINAL_ENCODE_BACKEND=${FINAL_ENCODE_BACKEND}
+FFMPEG_MCP_ENDPOINT=${FFMPEG_MCP_ENDPOINT}
+FFMPEG_MCP_HOST=${FFMPEG_MCP_HOST}
+FFMPEG_MCP_PORT=${FFMPEG_MCP_PORT}
+CLUSTER_ALLOW_MIXED_ARCH=${CLUSTER_ALLOW_MIXED_ARCH}
+CLUSTER_ARCH_SELECTOR_KEY=${CLUSTER_ARCH_SELECTOR_KEY}
+CLUSTER_NODE_SELECTOR=${CLUSTER_NODE_SELECTOR}
+EOF_ENV
+
+echo "Wrote ${ENV_OUT}"

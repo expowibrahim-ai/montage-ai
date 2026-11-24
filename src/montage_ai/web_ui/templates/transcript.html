@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% import "components/macros.html" as m %}
+
+{% block title %}Transcript Editor - Montage AI{% endblock %}
+
+{% block extra_css %}
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/transcript.css') }}">
+{% endblock %}
+
+{% block content %}
+    {% call m.section_header("TRANSCRIPT EDITOR", "Edit video by removing text. AI handles the cuts.") %}{% endcall %}
+
+    <div class="voxel-card">
+        <h3 class="text-primary mb-2">COMING SOON</h3>
+        <p class="text-xs text-muted">
+            Transcript Editor UI is not wired to the backend yet. Use the CLI or API for transcript-driven
+            edits until the editor is fully integrated.
+        </p>
+    </div>
+{% endblock %}
